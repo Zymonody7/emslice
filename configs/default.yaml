@@ -1,0 +1,15 @@
+# emslice 默认配置（命令行参数优先于此文件）
+# 用法: emslice solve --config configs/default.yaml
+matrix: data/bench/cube33.npz   # 输入矩阵（.npz/.npy/.mtx/.mat）
+triangle: auto                  # auto | full | upper | lower：仅存一个三角时自动恢复
+which: nearest                  # nearest | above | below；或改用 interval
+sigma: 120.0                    # 目标位移（目标频率对应的特征值）
+k: 20                           # 所需特征值个数
+tol: 1.0e-10                    # 后向误差门槛
+verify: true                    # 惯性完备性证书（保证目标频段不漏解）
+block: null                     # Krylov 块尺寸，null = 自动
+backend: auto                   # auto | petsc | scipy
+precision: double               # double | mixed
+threads: null                   # null = 使用全部核
+out: result
+format: npy                     # npy | npz | mat

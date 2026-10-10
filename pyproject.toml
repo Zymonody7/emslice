@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emslice"
+version = "0.1.0"
+description = "面向电磁谐振与微波器件仿真的大规模非正定厄密稀疏特征值求解器（惯性证书谱切片 + 位移求逆块 Krylov-Schur）"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "scipy>=1.9", "pyyaml>=6"]
+
+[project.optional-dependencies]
+mumps = ["petsc4py", "slepc4py"]   # 推荐经 conda-forge 安装，见 environment.yml
+test = ["pytest"]
+
+[project.scripts]
+emslice = "emslice.cli:main"
+
+[tool.setuptools]
+packages = ["emslice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

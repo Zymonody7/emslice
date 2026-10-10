@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# 求解输出与本地数据（可由 bench/cases.py、bench/get_public.sh 重新生成）
+/result/
+/result_*/
+data/
+results/dev*
+results/*.log
+
+# 命题方任务书仅本地参考，以官网发布为准
+docs/赛题任务书.pdf
+results/*/done

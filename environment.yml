@@ -1,0 +1,17 @@
+# conda env create -f environment.yml && conda activate emslice
+name: emslice
+channels: [conda-forge]
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pyyaml
+  - petsc=*=*real*      # 实数版 PETSc（复厄密矩阵经实嵌入处理）
+  - petsc4py
+  - mumps-mpi           # 由 petsc 依赖引入，对称不定 LDLᵀ + 惯性
+  - slepc               # 仅用于基准对比
+  - slepc4py
+  - psutil
+  - threadpoolctl
+  - matplotlib          # 绘制报告图
+  - pytest
