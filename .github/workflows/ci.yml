@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full:
+    # 完整后端：conda-forge PETSc + MUMPS（惯性证书、并行计数全部启用）
+    name: 完整后端 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      OMP_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+          cache-environment: true
+      - name: 安装
+        run: pip install --no-deps -e . && emslice info
+      - name: 单元与场景测试
+        run: python -m pytest -q
+      - name: 端到端冒烟（生成 → 低频求解 → 独立复核 → 证书）
+        run: |
+          emslice gen cube --N 12 --out smoke/cube12.npz
+          emslice solve smoke/cube12.npz --sigma 1e-3 --which above -k 12 --out smoke/low
+          emslice check smoke/cube12.npz smoke/low
+          python -c "import json,sys; sys.exit(0 if json.load(open('smoke/low/report.json'))['certified'] else 1)"
+
+  fallback:
+    # 最小化降级：只有 NumPy/SciPy（SuperLU），可求解但无证书
+    name: 降级模式 / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    env:
+      OMP_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 安装
+        run: python -m pip install --upgrade pip && pip install -e ".[test]" && emslice info
+      - name: 测试（需惯性的用例自动跳过）
+        run: python -m pytest -q
+      - name: 端到端冒烟
+        run: |
+          emslice gen cube --N 10 --out smoke/cube10.npz
+          emslice solve smoke/cube10.npz --sigma 50 -k 6 --out smoke/res
+          emslice check smoke/cube10.npz smoke/res

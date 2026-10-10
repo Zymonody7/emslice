@@ -28,7 +28,7 @@ pip install -e .
 emslice info                              # 查看可用后端
 ```
 
-无 PETSc 时自动降级为 SciPy SuperLU 后端（可求解，但不提供惯性证书）。
+无 PETSc 时可只用 `pip install -e .`：自动降级为 SciPy SuperLU 后端，三种查询模式都能求解，但不提供惯性证书（σ 单侧/区间查询改为“扩大最近集合再筛选”，报告中会注明）。
 
 ## 快速开始
 
@@ -71,6 +71,7 @@ emslice check data/small/cube20.npz result
 emslice/   matgen.py 测试矩阵 | io.py 读写与校验 | factor.py 分解与惯性 | krylov.py 块 Krylov-Schur | solver.py 主流程 | parallel.py 进程池 | cli.py
 bench/     cases.py 基准算例 | run.py 运行器（子进程隔离内存）| baselines.py SciPy/SLEPc 对比 | report.py 汇总 | get_public.sh 公开矩阵
 tests/     单元与场景测试（pytest）
+.github/   CI（完整后端 + 降级模式）、Issue/PR 模板
 configs/   默认配置
 docs/      赛题任务书、方案说明文档、演示视频脚本
 scripts/   reproduce.sh 一键复现
@@ -78,11 +79,16 @@ scripts/   reproduce.sh 一键复现
 
 ## 当前进展（2026-10-10）
 
-- [x] 求解器全部核心能力；14 项测试通过
+- [x] 求解器全部核心能力；15 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
 - [x] 10 万阶基准：10 个算例（含复厄密、公开矩阵 SuiteSparse 2cubes_sphere）全部证书通过
 - [x] 与 SLEPc / SciPy 对比（`results/full/report.md`）
 - [x] 方案说明文档初稿（`docs/方案说明文档.md`）、演示视频脚本、Dockerfile、一键复现脚本
-- [ ] 文档定稿与 PDF、录制演示视频
+- [x] 方案说明文档 PDF
+- [ ] 有限元（Nédélec）广义问题场景、Linux 多核实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
+
+## 参与贡献
+
+[CONTRIBUTING.md](CONTRIBUTING.md) · [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [SECURITY.md](SECURITY.md) · [行为准则](CODE_OF_CONDUCT.md) · [维护者](MAINTAINERS.md)
 
 ## 许可证
 
