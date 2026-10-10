@@ -163,3 +163,20 @@ def test_parallel_interval_slices():
     assert rep.certified and lam.size == ref.size and len(rep.certificate["slices"]) > 1
     assert np.abs(np.sort(lam) - ref).max() < 1e-8 * ev.max()
     assert any(r.get("seconds") is not None for r in rep.krylov_runs)
+
+
+def test_degraded_backend_without_inertia():
+    """仅 SciPy SuperLU（无惯性）时三种模式都能求解，只是不出证书。"""
+    A, ev = _cube(5)
+    phys = ev[ev > 1e-9]
+    sigma = float(phys[20])
+    lam, X, rep = Solver(A, None, Options(k=6, sigma=sigma, backend="scipy")).solve()
+    ref = np.sort(ev[np.argsort(np.abs(ev - sigma))[:6]])
+    assert rep.certified is None and any("[降级]" in d for d in rep.diagnostics)
+    assert np.abs(np.sort(lam) - ref).max() < 1e-8 * ev.max() and rep.residuals["all_below_tol"]
+    s_gap = 0.5 * (phys[7] + phys[phys > phys[7] * (1 + 1e-9)][0])   # 落在谱间隙中
+    lam, X, rep = Solver(A, None, Options(k=6, sigma=s_gap, which="above", backend="scipy")).solve()
+    assert np.allclose(lam, phys[phys > s_gap][:6], rtol=1e-9)
+    a, b = float(phys[5]) - 1e-6, float(phys[25]) + 1e-6
+    lam, X, rep = Solver(A, None, Options(which="interval", interval=(a, b), slice_max=8, backend="scipy")).solve()
+    assert lam.size == np.sum((ev >= a) & (ev <= b))

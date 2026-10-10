@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 import numpy as np
 import scipy.linalg as la
@@ -345,7 +345,9 @@ class Solver:
         t0 = time.perf_counter()
         try:
             self._start_pool()
-            if o.which == "interval":
+            if self.backend != "petsc":
+                lam, X = self._solve_degraded()
+            elif o.which == "interval":
                 lam, X = self._solve_interval(*o.interval)
             elif o.which in ("above", "below"):
                 lam, X = self._solve_one_sided(float(o.sigma), int(o.k), o.which)
@@ -371,6 +373,52 @@ class Solver:
         self.rep.timings["factor_sum"] = float(sum(f.get("seconds_factor", 0) for f in fz))
         self.rep.timings["krylov_sum"] = float(sum(r["seconds"] for r in self.rep.krylov_runs))
         return lam, X, self.rep
+
+    # ---------------------------------------------------------- 降级模式
+    def _solve_degraded(self):
+        """后端不提供惯性（如仅 SciPy SuperLU）时的最小化降级：可求解，但不出完备性证书。
+
+        nearest 照常求解；above/below/interval 无法用惯性括区，改为“扩大最近集合再筛选”：
+        在 σ（区间则取中点）处求最近 m 个，直到所得集合越出目标范围或个数足够，m 逐次加倍。
+        Krylov 按距位移由近到远收敛，这一做法通常可靠，但重特征值/密集谱下不能保证无遗漏。
+        """
+        o = self.o
+        self.rep.diagnostics.append(f"[降级] 后端 {self.backend} 不提供惯性：不做完备性证书"
+                                    + ("" if o.which == "nearest" else "；单侧/区间查询改为扩大最近集合再筛选，可能漏解"))
+        self.o = o = replace(o, verify=False)
+        if o.which == "nearest":
+            return self._solve_nearest(float(o.sigma), int(o.k))
+        if o.which == "interval":
+            a, b = (float(v) for v in o.interval)
+            if not a < b:
+                raise ValueError("区间需满足 a < b")
+            c, m = 0.5 * (a + b), max(int(o.slice_max), 1)
+        else:
+            c, m = float(o.sigma), 2 * int(o.k)
+        F, s_used = self._factor(c + self.PRE_OFFSET * (min(self.nA, 1e3 * abs(c)) if c else self.nA), "shift", keep=True)
+        self.rep.shifts.append(s_used)
+        try:
+            for _ in range(o.max_rounds):
+                m = min(m, self.n)
+                lam, X = self._refine(F, self._shift_invert(F, s_used, m, "nearest"))
+                if o.which == "interval":
+                    keep = (lam >= a) & (lam <= b)
+                    if np.any(~keep) or m >= self.n:   # 最近集合已越出区间：区间内的都已取到
+                        return lam[keep], X[:, keep]
+                else:
+                    lam, X = self._order(lam, X, c, o.which)
+                    ok = int(np.sum(lam >= c) if o.which == "above" else np.sum(lam <= c))
+                    if ok >= o.k or m >= self.n:
+                        return lam[: min(ok, o.k)], X[:, : min(ok, o.k)]
+                m *= 2
+            self.rep.diagnostics.append(f"[降级] {o.max_rounds} 轮扩大后仍未覆盖目标范围（m={m}），结果可能不完整")
+            if o.which == "interval":
+                keep = (lam >= a) & (lam <= b)
+                return lam[keep], X[:, keep]
+            ok = int(np.sum(lam >= c) if o.which == "above" else np.sum(lam <= c))
+            return lam[:ok], X[:, :ok]
+        finally:
+            F.free()
 
     # ---------------------------------------------------------- 最近 k 个
     def _solve_nearest(self, sigma, k):
