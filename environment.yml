@@ -9,6 +9,7 @@ dependencies:
   - petsc=*=*real*      # 实数版 PETSc（复厄密矩阵经实嵌入处理）
   - petsc4py
   - mumps-mpi           # 由 petsc 依赖引入，对称不定 LDLᵀ + 惯性
+  - mpich               # 固定 MPICH：单进程 MPI 初始化 ~0.4 s（OpenMPI 在多核服务器上 ~2 s，计数子进程各付一次）
   - slepc               # 仅用于基准对比
   - slepc4py
   - psutil

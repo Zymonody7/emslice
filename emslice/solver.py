@@ -54,7 +54,7 @@ class Options:
     threads: int | None = None
     seed: int = 0
     refine_steps: int = 2
-    workers: int | str = "auto"     # 惯性计数并发进程数（auto = min(3, 核数/2−1)）
+    workers: int | str = "auto"     # 惯性计数并发进程数（auto = min(3, 线程预算/2)，每进程至少 2 线程）
     blr: float | None = None        # MUMPS 块低秩压缩精度（None = 关闭）
 
 
@@ -77,6 +77,14 @@ class Report:
     norm_A: float = 0.0
     norm_B: float = 1.0
     workers: int = 1
+
+
+def cpu_count() -> int:
+    """可用逻辑核数：优先取进程 CPU 亲和集（尊重 numactl / taskset / 容器绑定），否则取全部逻辑核。"""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # macOS 等无亲和集接口
+        return os.cpu_count() or 2
 
 
 class _Threads:
@@ -127,16 +135,19 @@ class Solver:
         self.pattern = ShiftedPattern(self.A, self.B)
         self.backend = self.o.backend if self.o.backend != "auto" else available_backends()[0]
         self._slot = None          # 惯性计数复用的 MUMPS 槽
-        self.pool = None
+        self.pool = None           # AsyncCountPool：后台创建，提交即返回
+        self._parallel = False
+        self._workers_warm = False  # 子进程计数槽已完成符号分析
         self.max_conc = 1
         self.conc = {"count": 1, "slice": 1}
         # 线程预算：默认取物理核数估计（逻辑核/2，上限 8）；主进程与并发子任务按“预算 ÷ 并发数”分配
-        self.t_budget = int(self.o.threads or max(1, min(8, (os.cpu_count() or 2) // 2)))
+        self.t_budget = int(self.o.threads or max(1, min(8, cpu_count() // 2)))
         t_fac = min(self.t_budget, 4) if not self.o.threads else self.t_budget
         # MUMPS 默认 L0-OpenMP 要求求解与分解线程数一致（否则 INFOG(1)=-58），两阶段用同一线程数；
         # 进程池子进程各 1 线程，主进程 ≤4 线程，总线程数不超过核数（实测 8 线程会落到能效核反而变慢）
         self._thr_fac = _Threads(t_fac)
         self._thr_solve = self._thr_fac
+        self._thr_cnt = self._thr_fac   # 主进程计数槽的线程数（并发模式下固定为每进程份额，以复用符号分析）
         self.rep = Report(mode=self.o.which, n=self.n, dtype=str(np.dtype(self.dtype)), sigma=float(self.o.sigma),
                           k_requested=int(self.o.k), norm_A=self.nA, norm_B=self.nB)
 
@@ -160,7 +171,7 @@ class Solver:
                     self._slot = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=True)
                 slot = self._slot
             try:
-                with self._thr_fac():
+                with (self._thr_fac if keep else self._thr_cnt)():
                     F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=self.o.ooc,
                                   slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr)
             except NearSingularError as e:
@@ -200,22 +211,31 @@ class Solver:
     def counts(self, reqs, safe=False):
         """批量惯性计数 [(x, max_delta, direction)] → [(ν, x_used)]；有进程池时并发执行。
         safe=True 时近奇异失败返回 None 而不抛异常。"""
+        def local(req):
+            try:
+                return self.count_below(*req)
+            except NearSingularError:
+                if not safe:
+                    raise
+                return None
+
+        if not self._parallel:
+            return [local(r) for r in reqs]
         out = []
-        if self.pool is None:
-            for (x, md, d) in reqs:
-                try:
-                    out.append(self.count_below(x, md, d))
-                except NearSingularError:
-                    if not safe:
-                        raise
-                    out.append(None)
-            return out
         i = 0
         while i < len(reqs):
-            batch = reqs[i : i + self.conc["count"]]
+            rest = len(reqs) - i
+            w = self.conc["count"]
+            # 子进程已完成符号分析且一批放得下：全部交给子进程；否则主进程也承担一个（不空等），
+            # 内存受限（并发已被下调）时主进程不参与
+            if (self._workers_warm and rest <= w) or w < self.max_conc:
+                n_work, n_main = min(rest, w), 0
+            else:
+                n_work, n_main = min(rest - 1, w), 1
+            batch = reqs[i : i + n_work + n_main]
             i += len(batch)
-            thr = max(1, self.t_budget // len(batch))
-            futs = [self.pool.submit(x, md, d, thr) for (x, md, d) in batch]
+            futs = [self.pool.submit(x, md, d) for (x, md, d) in batch[:n_work]]
+            mine = [local(r) for r in batch[n_work:]]
             for f in futs:
                 try:
                     n, xu, facs, diags, pid = f.result()
@@ -230,6 +250,9 @@ class Solver:
                 self.rep.diagnostics.extend(diags)
                 out.append((n, xu))
                 self._memory_guard(max((fa.get("mem_mb_used") or 0) for fa in facs) if facs else None, "count")
+            if futs:
+                self._workers_warm = True
+            out.extend(mine)
         return out
 
     def _start_pool(self):
@@ -237,20 +260,29 @@ class Solver:
         if w == "auto":
             if self.n < 20000:  # 小规模分解只需毫秒级，进程池启动开销得不偿失
                 return
-            w = max(1, min(3, (os.cpu_count() or 2) // 2 - 1))
+            w = max(1, min(3, self.t_budget // 2))   # 每个子进程至少 2 线程；8 核机器上为 2 个子进程
         w = int(w)
         if w <= 1 or self.backend != "petsc" or (not self.o.verify and self.o.which == "nearest"):
             return
-        from .parallel import CountPool
+        from .parallel import AsyncCountPool
 
-        self.pool = CountPool(self.A, self.B, asdict(self.o), w)
+        # 每个子进程的线程数在池创建时固定（复用符号分析）；主进程参与计数时用同样的份额
+        thr = max(1, self.t_budget // w)
+        # nearest：子进程可在主进程分解 + Krylov 期间先做一次计数分解完成符号分析（petsc4py 不支持只做符号分析）。
+        # 只在核数富余时开启——8 核机器上它会与主进程争抢核与内存带宽，得不偿失
+        t_main = self._thr_fac.n
+        warm = bool(self.o.verify and self.o.which == "nearest" and cpu_count() >= t_main + 2 * w * thr)
+        self.pool = AsyncCountPool(self.A, self.B, asdict(self.o), w, threads=thr, warm=warm)
+        self._parallel = True
+        self._workers_warm = warm
+        self._thr_cnt = _Threads(thr)
         self.max_conc = w
         self.conc = {"count": w, "slice": w}
         self.rep.workers = w
 
     def _memory_guard(self, mem_mb_each, kind="slice"):
         """按单次分解内存与可用内存限制并发数（计数分解丢弃因子，内存约为保留因子时的一半，分开统计）。"""
-        if self.pool is None or not mem_mb_each:
+        if not self._parallel or not mem_mb_each:
             return
         try:
             import psutil
@@ -357,6 +389,7 @@ class Solver:
             if self.pool is not None:
                 self.pool.close()
                 self.pool = None
+                self._parallel = False
             if self._slot is not None:
                 self._slot.destroy()
                 self._slot = None
@@ -605,14 +638,13 @@ class Solver:
         slices = self._split(xa, xb, na, nb)
         self.rep.certificate["slices"] = [dict(a=s[0], b=s[1], count=s[3] - s[2]) for s in slices]
         lams, Xs = [], []
-        if self.pool is not None and len(slices) > 1:
+        if self._parallel and len(slices) > 1:
             # 切片彼此独立：分发到进程池并发求解（每片：分解 + 位移-求逆 + 证书补解）
             i = 0
             while i < len(slices):  # 按内存允许的并发数分批提交
                 wave = slices[i : i + self.conc["slice"]]
                 i += len(wave)
-                thr = max(1, self.t_budget // len(wave))
-                for f in [self.pool.submit_slice(*sl, threads=thr) for sl in wave]:
+                for f in [self.pool.submit_slice(*sl) for sl in wave]:
                     lam, X, facs, runs, diags, pid = f.result()
                     for fa in facs:
                         fa["worker"] = pid
