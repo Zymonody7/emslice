@@ -641,7 +641,11 @@ class Solver:
                 spec["plan"] = plan
                 if plan is not None and plan[0][2] == plan[1][2] == "single":
                     spec["futs"] = [self.pool.submit(x, INF, d, pr) for (x, d, pr) in plan]
-        lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest", monitor=monitor))
+        # 分解昂贵（首次分解 ≥4 s，如复厄密周期问题）且要出混合精度证书时，主 Krylov 多求一个块：第 k 个附近的
+        # 简并副本与紧邻特征值多半直接收敛为“已得”，证书端点可放进真实谱间隙、两侧都用单精度计数——
+        # 多出的 Krylov（约 +20–30%）远小于一次双精度计数比单精度多出的时间（鲲鹏复厄密十万阶约 23 s）
+        extra = (o.block or 8) if (o.verify and self.count_prec == "single" and self._first_factor_seconds() >= 4.0) else 0
+        lam, X = self._refine(F, self._shift_invert(F, s_used, k + extra, "nearest", monitor=monitor))
         lam, X = self._order(lam, X, sigma, "nearest")
         rk = float(np.abs(lam[:k] - sigma).max()) if lam.size else 0.0
         too_far = abs(s_used - sigma) > 1e-2 * rk
