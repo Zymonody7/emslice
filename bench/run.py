@@ -19,22 +19,6 @@ import json, sys, time, resource, os
 sys.path.insert(0, {root!r})
 import numpy as np
 case = json.loads(sys.argv[1]); solver = sys.argv[2]; extra = json.loads(sys.argv[3])
-import threading
-_peak = [0.0]
-def _sample():  # 进程树（主进程 + 惯性计数子进程）的 RSS 之和，每 50 ms 采样
-    try:
-        import psutil
-    except ImportError:
-        return
-    me = psutil.Process()
-    while True:
-        try:
-            tot = me.memory_info().rss + sum(c.memory_info().rss for c in me.children(recursive=True))
-        except Exception:
-            tot = 0
-        _peak[0] = max(_peak[0], tot / 2**20)
-        time.sleep(0.05)
-threading.Thread(target=_sample, daemon=True).start()
 from emslice.io import load_matrix
 A, info = load_matrix(case["matrix"])
 B = load_matrix(case["B"])[0] if case.get("B") else None
@@ -76,7 +60,6 @@ except Exception as e:
     out["error"] = f"{{type(e).__name__}}: {{e}}"
     out["seconds"] = time.perf_counter() - t0
 out["peak_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
-out["peak_tree_mb"] = round(_peak[0], 1) or None  # 含子进程的峰值（采样）
 print("@@RESULT" + json.dumps(out, default=str))
 """
 
@@ -90,15 +73,56 @@ def run_case(case, solver, extra, threads, timeout):
             env.pop(v, None)
     code = WORKER.format(root=ROOT)
     t = time.time()
-    try:
-        p = subprocess.run([sys.executable, "-c", code, json.dumps(case), solver, json.dumps(extra)], capture_output=True,
-                           text=True, timeout=timeout, env=env, cwd=ROOT)
-    except subprocess.TimeoutExpired:
+    p = subprocess.Popen([sys.executable, "-c", code, json.dumps(case), solver, json.dumps(extra)], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, env=env, cwd=ROOT)
+    peak = _watch(p, timeout)   # 父进程从外部采样整棵进程树的 RSS（子进程里的采样线程在持有 GIL 的扩展调用期间采不到样）
+    if peak is None:
         return dict(name=case["name"], solver=solver, error=f"timeout {timeout}s", seconds=float(timeout))  # 墙钟可能含系统休眠，记为时限
-    for line in p.stdout.splitlines():
+    out, err = p.communicate()
+    for line in out.splitlines():
         if line.startswith("@@RESULT"):
-            return json.loads(line[8:])
-    return dict(name=case["name"], solver=solver, error=(p.stderr or p.stdout)[-800:], seconds=time.time() - t)
+            r = json.loads(line[8:])
+            r["peak_tree_mb"] = round(peak, 1) if peak else None
+            return r
+    return dict(name=case["name"], solver=solver, error=(err or out)[-800:], seconds=time.time() - t)
+
+
+def _watch(p, timeout):
+    """等待子进程结束，期间每 50 ms 采样其进程树（含惯性计数子进程）的 RSS 之和；超时返回 None。"""
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    import threading
+
+    peak = [0.0]
+    stop = threading.Event()
+
+    def sample():
+        try:
+            pr = psutil.Process(p.pid)
+        except Exception:
+            return
+        while not stop.is_set():
+            try:
+                tot = pr.memory_info().rss + sum(c.memory_info().rss for c in pr.children(recursive=True))
+                peak[0] = max(peak[0], tot / 2**20)
+            except Exception:
+                pass
+            stop.wait(0.05)
+
+    th = threading.Thread(target=sample, daemon=True) if psutil else None
+    if th:
+        th.start()
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        return None
+    finally:
+        stop.set()
+    return peak[0]
 
 
 def main():

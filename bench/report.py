@@ -56,7 +56,7 @@ def main(d):
             err = r.get("error")
             lines.append(
                 f"| {name} | {r.get('scenario', '')} | {r.get('n', '—')} | {LABEL[s]} | "
-                f"{fmt(r.get('seconds'), '{:.1f}')} | {fmt(r.get('peak_tree_mb') or r.get('peak_rss_mb'), '{:.0f}')} | "
+                f"{fmt(r.get('seconds'), '{:.1f}')} | {fmt(max([v for v in (r.get('peak_tree_mb'), r.get('peak_rss_mb')) if v] or [None]) if (r.get('peak_tree_mb') or r.get('peak_rss_mb')) else None, '{:.0f}')} | "
                 f"{r.get('k', '—') if not err else '失败'} | {cert} | {fmt(r.get('backward_max'))} | {fmt(ref_err)} | "
                 f"{r.get('missing_vs_ref', '—') if not err else err[:40]} |")
     out = os.path.join(d, "report.md")
