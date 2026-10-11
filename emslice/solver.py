@@ -164,6 +164,7 @@ class Solver:
         self._keep_busy = False    # keep 槽上是否有活的保留因子分解
         self.pool = None           # AsyncCountPool：后台创建，提交即返回
         self._parallel = False
+        self._lazy_pool = False    # 按需启动的单子进程池（分解昂贵时让两次证书计数并行），不做推测式提交
         self._workers_warm = False  # 子进程计数槽已完成符号分析
         self.max_conc = 1
         self.conc = {"count": 1, "slice": 1}
@@ -363,6 +364,36 @@ class Solver:
         self.max_conc = w
         self.conc = {"count": w, "slice": w}
         self.rep.workers = w
+
+    def _maybe_lazy_pool(self):
+        """位移分解昂贵（实测 ≥6 s）时按需启动一个子进程，让两次证书计数由主进程与子进程各用一半线程并行完成。
+        MUMPS 的线程扩展是次线性的：鲲鹏 8 核上光子晶体（21.6 万阶实嵌入）两次计数串行各用 8 线程共 109 s，
+        v0.1 并行（各 2 线程）墙钟 95 s。子进程的创建与矩阵传输（约 2 s）与 Krylov 迭代重叠。
+        十万阶实数问题（分解约 2 s）串行更快（省去子进程的符号分析），不启用；给定 --mem-limit-gb 或可用内存
+        不足（< 3 倍位移分解内存）时也不启用。"""
+        o = self.o
+        if (self.pool is not None or not o.verify or self.backend != "petsc" or o.workers != "auto" or o.mem_limit_gb
+                or self.n < 20000 or self.t_budget < 4 or self._first_factor_seconds() < 6.0):
+            return
+        mem = max((f.get("mem_mb_used") or 0) for f in self.rep.factorizations) if self.rep.factorizations else 0
+        try:
+            import psutil
+
+            if psutil.virtual_memory().available / 2**20 < 3 * mem:
+                return
+        except Exception:  # pragma: no cover
+            return
+        from .parallel import AsyncCountPool
+
+        thr = max(1, self.t_budget // 2)
+        self.pool = AsyncCountPool(self.A, self.B, asdict(o), 1, threads=thr, warm=False)
+        self._parallel = self._lazy_pool = True
+        self._thr_cnt = _Threads(thr)
+        self.max_conc = 1
+        self.conc = {"count": 1, "slice": 1}
+        self.rep.workers = 1
+        self.rep.diagnostics.append(f"[并行] 分解较贵（{self._first_factor_seconds():.1f} s），证书计数由主进程与 1 个子进程"
+                                    f"各 {thr} 线程并行")
 
     def _memory_guard(self, mem_mb_each, kind="slice"):
         """按单次分解内存与可用内存限制并发数（计数分解丢弃因子，内存约为保留因子时的一半，分开统计）。"""
@@ -630,9 +661,10 @@ class Solver:
         F, s_used = self._factor(sigma + self.PRE_OFFSET * scale, "shift", keep=True)
         self.rep.shifts.append(s_used)
         self._memory_guard(F.stats.get("mem_mb_used"))
+        self._maybe_lazy_pool()
         spec = {}
         monitor = None
-        if o.verify and self.count_prec == "single" and self._parallel:
+        if o.verify and self.count_prec == "single" and self._parallel and not self._lazy_pool:
             def monitor(theta, resid, nev):
                 """推测式证书计数：期望的 Ritz 值稳定（相对残差 ≤ 1e-6）后按估计窗口提前提交单精度计数，
                 与剩余 Krylov 迭代重叠；收敛后核对端点仍有效才采用（见 _certify_nearest_mixed）。"""
@@ -815,7 +847,7 @@ class Solver:
         o = self.o
         plan = self._plan_mixed(sigma, k, lam, self._ritz, self._absorb_budget())
         ks0 = self.rep.krylov_runs[0]["seconds"] if self.rep.krylov_runs else np.inf
-        if (plan is not None and "double" in (plan[0][2], plan[1][2]) and not self._parallel
+        if (plan is not None and "double" in (plan[0][2], plan[1][2]) and (not self._parallel or self._lazy_pool)
                 and 0.4 * self._first_factor_seconds() > ks0):
             # 按需扩展：一侧因 r_k 附近未求出的估计值（多为第 k 个的简并副本）被迫双精度，而该侧改用单精度省下的时间
             # （≈半次数值分解）超过整轮主 Krylov 时，收缩已得向量再求一个块，让它们收敛为“已得”后重新规划

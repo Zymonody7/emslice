@@ -69,13 +69,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dirs", nargs="+")
     ap.add_argument("--override", nargs="*", default=[])
-    ap.add_argument("--baseline")
+    ap.add_argument("--baseline", help="v0.1 结果目录（emslice 标签）；与 --pair 二选一")
+    ap.add_argument("--pair", help="同一时段交替运行的 v0.1/v0.2 结果目录（标签 v01 / v02），给出“相对 v0.1 提速”")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     rows = {}
     for d in a.dirs + a.override:
         rows.update(load(d))
     base = load(a.baseline) if a.baseline else {}
+    if a.pair:   # 提速比只在同一时段的交替运行内计算，避免机器负载变化带来的偏差
+        pr = load(a.pair)
+        base = {(n, "speedup"): pr[(n, "v01")]["seconds"] / pr[(n, "v02")]["seconds"]
+                for (n, sv) in pr if sv == "v02" and (n, "v01") in pr and not pr[(n, "v01")].get("error")}
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "results.jsonl"), "w", encoding="utf-8") as f:
         for r in rows.values():
@@ -91,18 +96,18 @@ def main():
 
 
 def table(names, rows, base):
-    lines = ["| 算例（n≈10 万） | emslice 含证书 | emslice 快速 | v0.1 含证书 | SLEPc | SciPy | 峰值内存 emslice / SLEPc |",
+    lines = ["| 算例（n≈10 万） | emslice 含证书 | emslice 快速 | 相对 v0.1 | SLEPc | SciPy | 峰值内存 emslice / SLEPc |",
              "|---|---|---|---|---|---|---|"]
     for n in names:
         e = rows.get((n, "emslice"))
         ref_k = e.get("k") if e else None
-        b = base.get((n, "emslice"))
+        b = base.get((n, "speedup"))
         sl = rows.get((n, "slepc"))
         mem = lambda r: (max(v for v in (r.get("peak_tree_mb"), r.get("peak_rss_mb")) if v) if r else None)
         me, ms = mem(e), mem(sl)
         lines.append("| " + " | ".join([
             TITLE[n], cell(e, emslice=True), cell(rows.get((n, "emslice-noverify")), ref_k),
-            f"{b['seconds']:.1f} s" if b and not b.get("error") else "—",
+            f"{b:.2f}×" if b else "—",
             cell(sl, ref_k), cell(rows.get((n, "scipy")), ref_k),
             f"{me / 1024:.1f} / {ms / 1024:.1f} GB" if me and ms else "—"]) + " |")
     return "\n".join(lines) + "\n"
