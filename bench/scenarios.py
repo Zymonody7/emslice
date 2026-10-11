@@ -12,6 +12,7 @@ import sys
 ROWS = [  # (场景, 算例, 求解器标签, 说明)
     ("零附近密集谱 / 低频击穿", "cube_low_freq", "emslice", "σ≈0 以上 20 个，3.2 万重零空间"),
     ("零附近密集谱 / 低频击穿", "fem_cavity_low", "emslice", "有限元，1.3 万维零空间"),
+    ("零附近密集谱 / 低频击穿", "fem_dr_above50", "emslice", "有限元介质谐振器，σ≈0 以上 50 个"),
     ("零附近密集谱 / 低频击穿", "cube_null_cluster", "emslice", "σ 恰在零空间上"),
     ("重特征值", "cube_mid_band", "emslice", "σ 恰为 18 重谐振点，第 k 个为 12 重"),
     ("重特征值", "bloch_complex_hermitian", "emslice", "复厄密，全谱二重简并"),
@@ -19,12 +20,11 @@ ROWS = [  # (场景, 算例, 求解器标签, 说明)
     ("近奇异位移", "cavity_upper_storage", "emslice", "σ 恰为二重谐振点 + 仅存上三角"),
     ("大 k", "cube_k100", "emslice", "最近 100 个"),
     ("大 k", "cube_k200", "emslice", "最近 200 个"),
+    ("大 k", "fem_dr_k60", "emslice", "有限元最近 60 个"),
     ("区间", "cube_interval", "emslice", "[2990, 3040] 内全部"),
-    ("区间", "fem_dr_interval", "emslice", "有限元 [0.0105, 0.013] 内全部"),
+    ("区间", "fem_dr_interval", "emslice", "有限元 [0.0105, 0.016] 内全部"),
     ("内存受限", "bloch_mem", "emslice-default", "复厄密 21.6 万实嵌入，默认"),
-    ("内存受限", "bloch_mem", "emslice-limit8", "--mem-limit-gb 8"),
-    ("内存受限", "bloch_mem", "emslice-limit4", "--mem-limit-gb 4（自动外存）"),
-    ("内存受限", "bloch_mem", "emslice-ooc", "--ooc on"),
+    ("内存受限", "bloch_mem", "emslice-limit5", "--mem-limit-gb 5（自动外存）"),
 ]
 
 
