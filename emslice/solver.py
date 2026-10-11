@@ -697,9 +697,14 @@ class Solver:
         F.free()
         return lam[:k], X[:, :k]
 
+    def _first_factor_seconds(self):
+        """首次保留因子分解的实测耗时（含符号分析），用于在“多一次分析/多一轮补解”与“省一半数值分解”之间取舍。"""
+        return next((f.get("seconds_factor", 0.0) for f in self.rep.factorizations if not f.get("count_only")), 0.0)
+
     def _expensive(self, F):
-        """数值分解是否占主导（flops/nnz 大，如复厄密周期问题）：此时省一次双精度分解远比多一轮 Krylov 补解划算。"""
-        return F.stats.get("flops", 0.0) >= 2e5 * self.pattern.indices.size
+        """分解很贵（实测 ≥15 s，如复厄密周期问题）：单精度计数省下的时间超过一轮收缩补解，值得把少量未求出的
+        简并副本并入窗口交给补解。只影响耗时，不影响正确性。"""
+        return self._first_factor_seconds() >= 15.0
 
     def _plan_mixed(self, sigma, k, lam, ritz, expensive=False):
         """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
@@ -768,9 +773,10 @@ class Solver:
             return False, lam, X, F
         lo, hi = plan
         if (not self._parallel and (lo[2] == "double") != (hi[2] == "double") and "single" not in self._slots
-                and F.stats.get("flops", 0.0) < 2e5 * self.pattern.indices.size):
-            # 一侧必须双精度时，另一侧用单精度还要为单精度槽另做一次符号分析（耗时 ∝ nnz）；数值分解（∝ flops）
-            # 不占主导时（鲲鹏 8 核十万阶实矩阵：分析 0.75 s vs 单/双精度数值 0.7/1.4 s）两侧都在位移槽上做双精度更快
+                and self._first_factor_seconds() < 4.0):
+            # 一侧必须双精度时，另一侧用单精度还要为单精度槽另做一次符号分析；分解本身不贵时（鲲鹏 8 核十万阶实矩阵：
+            # 首次分解 1.9 s，其中分析 0.75 s、单/双精度数值 0.7/1.4 s）两侧都在位移槽上做双精度更快；
+            # 分解贵时（有限元铁氧体腔首次 12 s，数值约 8.5 s）单精度省下的一半数值分解远超一次分析
             lo, hi = [(x, d, "double") for (x, d, _p) in (lo, hi)]
         res = None
         if spec and spec.get("futs"):

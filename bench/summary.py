@@ -81,6 +81,16 @@ def main():
         for r in rows.values():
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     names = [n for n in TITLE if any(k[0] == n for k in rows)]
+    md = ""
+    for title, group in (("标准问题与公开矩阵", [n for n in names if not n.startswith("fem_")]),
+                         ("有限元广义问题", [n for n in names if n.startswith("fem_")])):
+        if group:
+            md += f"### {title}\n\n" + table(group, rows, base) + "\n"
+    open(os.path.join(a.out, "summary.md"), "w", encoding="utf-8").write(md)
+    print(md)
+
+
+def table(names, rows, base):
     lines = ["| 算例（n≈10 万） | emslice 含证书 | emslice 快速 | v0.1 含证书 | SLEPc | SciPy | 峰值内存 emslice / SLEPc |",
              "|---|---|---|---|---|---|---|"]
     for n in names:
@@ -95,9 +105,7 @@ def main():
             f"{b['seconds']:.1f} s" if b and not b.get("error") else "—",
             cell(sl, ref_k), cell(rows.get((n, "scipy")), ref_k),
             f"{me / 1024:.1f} / {ms / 1024:.1f} GB" if me and ms else "—"]) + " |")
-    md = "\n".join(lines) + "\n"
-    open(os.path.join(a.out, "summary.md"), "w", encoding="utf-8").write(md)
-    print(md)
+    return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":
