@@ -55,7 +55,7 @@ class Options:
     threads: int | None = None
     seed: int = 0
     refine_steps: int = 6
-    workers: int | str = "auto"     # 惯性计数并发进程数（auto = min(3, 线程预算/2)，每进程至少 2 线程）
+    workers: int | str = "auto"     # 计数/切片子进程数（auto：线程预算 ≥16 时 min(3, 预算/8)，否则不开进程池、主进程串行）
     blr: float | None = None        # MUMPS 块低秩压缩精度（None = 关闭）
 
 
@@ -380,6 +380,32 @@ class Solver:
         w, S = la.eigh(Hm, G)
         return w, X @ S
 
+    def _binv_norms(self, R):
+        """各列的 ‖r‖_{B⁻¹} = sqrt(rᴴB⁻¹r)：Jacobi 预条件共轭梯度解 BW = R（B 对称正定，质量阵条件数不大，
+        十万阶有限元质量阵几十步收敛）。B 缺省时即 2-范数。"""
+        if self.B is None:
+            return np.linalg.norm(R, axis=0)
+        d = np.real(self.B.diagonal())
+        W = np.zeros_like(R)
+        Rr = R.copy()
+        Z = Rr / d[:, None]
+        P = Z.copy()
+        rz = np.real(np.einsum("ij,ij->j", Rr.conj(), Z))
+        r0 = np.maximum(np.linalg.norm(R, axis=0), np.finfo(float).tiny)
+        for _ in range(2000):
+            BP = self.B @ P
+            pbp = np.real(np.einsum("ij,ij->j", P.conj(), BP))
+            alpha = np.where(pbp > 0, rz / np.where(pbp > 0, pbp, 1.0), 0.0)
+            W += P * alpha
+            Rr -= BP * alpha
+            if np.all(np.linalg.norm(Rr, axis=0) <= 1e-4 * r0):   # 二次型 rᴴB⁻¹r 的相对误差约为其平方（~1e-8）
+                break
+            Z = Rr / d[:, None]
+            rz_new = np.real(np.einsum("ij,ij->j", Rr.conj(), Z))
+            P = Z + P * np.where(rz > 0, rz_new / np.where(rz > 0, rz, 1.0), 0.0)
+            rz = rz_new
+        return np.sqrt(np.maximum(np.real(np.einsum("ij,ij->j", R.conj(), W)), 0.0))
+
     def _angle_bounds(self, lam, X):
         """特征向量子空间夹角的后验上界（Davis–Kahan sinΘ 定理）。
 
@@ -388,20 +414,16 @@ class Solver:
         δ_C 为簇到“簇外真实特征值”的距离。完备性证书保证窗口内的真实特征值都已求得（各在其 Ritz 值的残差半径内），
         窗口外的特征值离簇至少到窗口边界的距离，因此 δ_C 有可靠下界——没有证书时这一下界无从得知。
         落在证书窗口外的特征值（如与第 k 个并列、按内窗口证书接受的副本）不给上界。
-        广义问题以 λ_min(B) 的 Lanczos 估计折算 B^{-1/2}（估计值，报告中注明）。"""
+        广义问题的 ‖·‖_{B⁻¹} 由共轭梯度求得（见 _binv_norms）。"""
         lo, hi, known = self._known
         known = np.sort(np.asarray(known, dtype=float))
-        bmin = 1.0
-        if self.B is not None:
-            try:
-                import scipy.sparse.linalg as spla
-
-                bmin = 0.5 * float(spla.eigsh(self.B, k=1, which="SA", tol=1e-3, return_eigenvectors=False)[0])
-            except Exception:
-                return dict(subspace_sin_bound_max=None)
         tol_c = 1e-8 * max(np.abs(lam).max(), 1e-3 * self.nA)
         cuts = np.flatnonzero(np.diff(lam) > tol_c) + 1
-        rmax = float(self.residuals(lam, X)[0].max()) / np.sqrt(bmin)
+        # Rayleigh-Ritz 给出的 Ritz 向量彼此 B-正交：按 B-范数归一后各列残差的 ‖·‖_{B⁻¹} 只需一次共轭梯度
+        BX = X if self.B is None else self.B @ X
+        xb = np.sqrt(np.maximum(np.real(np.einsum("ij,ij->j", X.conj(), BX)), np.finfo(float).tiny))
+        nb = self._binv_norms((self.A @ X - BX * lam[None, :]) / xb[None, :])
+        rmax = float(nb.max())
         out = np.full(lam.size, np.nan)
         for idx in np.split(np.arange(lam.size), cuts):
             c_lo, c_hi = lam[idx[0]], lam[idx[-1]]
@@ -414,19 +436,10 @@ class Solver:
             delta = min(gaps)
             if delta <= 0:
                 continue
-            Xc = X[:, idx]
-            BXc = Xc if self.B is None else self.B @ Xc
-            G = Xc.conj().T @ BXc
-            Lc = np.linalg.cholesky(0.5 * (G + G.conj().T))
-            Q = np.linalg.solve(Lc, Xc.conj().T).conj().T          # B-正交化
-            BQ = Q if self.B is None else self.B @ Q
-            Hc = Q.conj().T @ (self.A @ Q)
-            R = self.A @ Q - BQ @ (0.5 * (Hc + Hc.conj().T))
-            out[idx] = min(1.0, np.linalg.norm(R) / np.sqrt(bmin) / delta)
+            out[idx] = min(1.0, float(np.sqrt(np.sum(nb[idx] ** 2))) / delta)
         ok = out[np.isfinite(out)]
         return dict(subspace_sin_bound_max=float(ok.max()) if ok.size else None,
-                    per_eig_subspace_sin_bound=[None if not np.isfinite(v) else float(v) for v in out],
-                    subspace_bound_kind="rigorous" if self.B is None else "estimate(λmin(B) Lanczos)")
+                    per_eig_subspace_sin_bound=[None if not np.isfinite(v) else float(v) for v in out])
 
     # ------------------------------------------------------- 一次位移-求逆求解
     def _shift_invert(self, F, shift, nev, which, locked=None, block=None, v0=None, monitor=None):
