@@ -42,6 +42,8 @@ def _slepc(A, k, sigma, which, B=None):
     if sys.platform == "darwin":
         os.environ.setdefault("FI_PROVIDER", "udp;ofi_rxd")
         os.environ.setdefault("FI_UDP_IFACE", "lo0")
+    else:
+        os.environ.setdefault("UCX_TLS", "self,sm")
     import petsc4py
     import slepc4py
 

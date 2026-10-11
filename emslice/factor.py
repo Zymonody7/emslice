@@ -157,6 +157,10 @@ def _petsc():
             # 单进程运行时改用本地回环上的 UDP 传输即可。
             os.environ.setdefault("FI_PROVIDER", "udp;ofi_rxd")
             os.environ.setdefault("FI_UDP_IFACE", "lo0")
+        else:
+            # 只用单进程 MPI（COMM_SELF）：限定 UCX 走本进程/共享内存，避免 MPICH 去初始化 InfiniBand 等网卡
+            # （GitHub Ubuntu 机器上 ud_verbs/mana 设备打开失败会直接中止 MPI_Init）
+            os.environ.setdefault("UCX_TLS", "self,sm")
         import petsc4py
 
         petsc4py.init([])
