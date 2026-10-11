@@ -159,7 +159,8 @@ class Solver:
         self.backend = self.o.backend if self.o.backend != "auto" else available_backends()[0]
         # 计数精度：单精度 LDLᵀ 只给出“邻近矩阵”的精确惯性，凡进入证书的计数都检查 η 裕量，不足时回退双精度
         self.count_prec = "single" if (self.backend == "petsc" and self.o.precision in ("auto", "mixed")) else "double"
-        self._slots = {}           # 惯性计数复用的 MUMPS 槽（按精度）
+        self._slots = {}           # 常驻 MUMPS 槽：keep（保留因子，双精度计数在其空闲时也复用它）、single（单精度计数）
+        self._keep_busy = False    # keep 槽上是否有活的保留因子分解
         self.pool = None           # AsyncCountPool：后台创建，提交即返回
         self._parallel = False
         self._workers_warm = False  # 子进程计数槽已完成符号分析
@@ -202,9 +203,12 @@ class Solver:
             if self.backend == "petsc":
                 # 同一稀疏结构的槽按用途常驻复用（只做数值分解）：保留因子的位移/切片分解一个槽，计数按精度各一个槽。
                 # 保留槽上同一时刻只有一个活的分解（调用方在下一次保留分解前已 free）
-                key = "keep" if keep else prec
+                # 双精度计数在 keep 槽空闲且线程数相同时复用它（与位移/切片分解共享符号分析；
+                # MUMPS 的 L0-OpenMP 结构按分析时的线程数确定，线程数不同的复用会得到错误结果）
+                share = prec == "double" and not self._keep_busy and self._thr_cnt.n == self._thr_fac.n
+                key = "keep" if (keep or share) else prec
                 if key not in self._slots:
-                    self._slots[key] = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=not keep,
+                    self._slots[key] = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=key != "keep",
                                                  precision=prec, ooc=bool(self.o.ooc) if self.o.ooc != "auto" else False)
                 slot = self._slots[key]
             try:
@@ -221,6 +225,9 @@ class Solver:
                     reason = f"探针增长因子 {F.stats['growth']:.1e}"
             if reason is None:
                 self.rep.factorizations.append(dict(F.stats, shift=x, purpose=purpose, inertia=F.inertia))
+                if keep and slot is not None:
+                    self._keep_busy = True
+                    F.on_free = self._release_keep
                 if delta:
                     self.rep.diagnostics.append(
                         f"[近奇异位移] {purpose} 位移 {shift:.15g} 贴近特征值（{'; '.join(reasons)}），"
@@ -238,6 +245,15 @@ class Solver:
             if abs(delta) > max_delta:
                 break
         raise NearSingularError(f"在 {shift} 附近多次扰动后仍奇异: {reasons}")
+
+    def _release_keep(self):
+        self._keep_busy = False
+
+    def _ensure_factor(self, F, shift):
+        """保留槽被双精度计数复用过：补解前按原位移重新数值分解（复用符号分析）。"""
+        if F.freed:
+            F, _ = self._factor(shift, "shift(重分解)", keep=True)
+        return F
 
     def count_below(self, x: float, max_delta: float = INF, direction: int = 0, prec: str = "double") -> tuple[int, float]:
         """ν(x) = #{λ < x}（惯性计数），返回 (计数, 实际使用的位移)。
@@ -606,7 +622,7 @@ class Solver:
             F.free()
             return lam[:k], X[:, :k]
         if self.count_prec == "single":
-            done, lam, X = self._certify_nearest_mixed(F, s_used, sigma, k, lam, X, block, spec)
+            done, lam, X, F = self._certify_nearest_mixed(F, s_used, sigma, k, lam, X, block, spec)
             if done:
                 F.free()
                 return lam[:k], X[:, :k]
@@ -617,8 +633,12 @@ class Solver:
             if rho <= zero:
                 self.rep.certified = True
                 self.rep.certificate = dict(round=rnd, kind="cluster-at-sigma", r_k=rk)
+                if not self._parallel:
+                    F.free()     # 计数复用位移分解的槽（F.inertia 仍可用）
                 self._cluster_note(sigma, rk, F, s_used)
                 break
+            if not self._parallel:
+                F.free()         # 串行计数复用位移分解的槽，省一次符号分析；补解时再数值重分解
             (n_lo, x_lo), (n_hi, x_hi) = self.counts([(sigma - rho, INF, 0), (sigma + rho, INF, 0)])
             inside = int(n_hi - n_lo)
             found_in = int(np.sum((lam > x_lo) & (lam < x_hi)))
@@ -636,6 +656,7 @@ class Solver:
             block = min(max(block, missing + 1), 16)
             self.rep.diagnostics.append(f"[完备性] 第 {rnd} 轮：距 σ 小于 r_k 的惯性计数 {inside} > 已得 {found_in}，"
                                         f"漏解 {missing} 个（重特征值/密集谱）→ 收缩已得向量，块尺寸 {block} 继续")
+            F = self._ensure_factor(F, s_used)
             X2 = self._shift_invert(F, s_used, missing, "nearest", locked=X, block=block)
             lam, X = self._refine(F, np.hstack([X, X2]))
             lam, X = self._order(lam, X, sigma, "nearest")
@@ -647,11 +668,12 @@ class Solver:
     def _plan_mixed(self, sigma, k, lam, ritz):
         """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
 
-        单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。两侧各自选择：
-          * 外端点（单精度）：x = σ ± ρ，ρ = r_k + 4η。要求 r_k 之外有干净间隙——Krylov 的额外 Ritz 值显示
-            (r_k−2η, r_k+8η) 内没有未求出的特征值（第 k 个为重特征值时，块 Krylov 中未收敛的副本会以额外 Ritz 值出现；
-            若仍有漏网的副本，计数会多出它们，按“补解”处理，不影响正确性）；
-          * 内端点（双精度）：x = σ ± (r_k − τ)，τ = 1e-7·r_k（原方案；与第 k 个并列的特征值任取其一）。
+        单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。
+        每一侧沿 |λ−σ| 由 r_k 向外扫描已得特征值与“未求出特征值的估计”（Krylov 额外 Ritz 值——它们与已收敛的
+        Ritz 向量正交，数值与已得特征值相同时正是未求出的简并副本），在第一个宽度 ≥ 4η 的间隙里放单精度外端点
+        （距两侧各 ≥ 2η，故 ρ − η > r_k）；已得特征值可以被划入窗口，未求出的估计值挡在间隙之前则该侧
+        改用双精度内端点 x = σ ± (r_k − τ)，τ = 1e-7·r_k（与第 k 个并列的特征值任取其一）。
+        估计不准只会造成计数多出（按“补解”处理）或回退双精度，不影响证书的正确性。
         """
         lam = np.asarray(lam, dtype=float)
         if lam.size < k:
@@ -663,20 +685,23 @@ class Solver:
             return None
         ritz = np.asarray(ritz, dtype=float)
         ritz = ritz[np.isfinite(ritz)]
-        if ritz.size:   # 去掉与已得特征值重合的 Ritz 值
-            ritz = ritz[np.min(np.abs(ritz[:, None] - lam[None, :]), axis=1) > 2 * eta]
 
         def plan(side):
             d = np.abs(lam - sigma)[np.sign(lam - sigma) == side]
             rd = np.abs(ritz - sigma)[np.sign(ritz - sigma) == side]
-            if np.any((rd > rk - 2 * eta) & (rd < rk + 8 * eta)):
+            if np.any((rd > rk - 2 * eta) & (rd <= rk + 2 * eta)):
                 return sigma + side * (rk - tau), 0, "double"
-            rho = rk + 4 * eta
-            for _ in range(d.size + 1):   # 已得特征值落在端点附近：把它划入窗口内，端点继续外推
-                near = d[np.abs(d - rho) <= 2 * eta]
-                if not near.size:
+            pts = sorted([(v, True) for v in d[d > rk]] + [(v, False) for v in rd[rd > rk]])
+            a = rk
+            for v, found in pts:
+                if v - a >= 4 * eta:
                     break
-                rho = float(near.max()) + 4 * eta
+                if not found:
+                    return sigma + side * (rk - tau), 0, "double"
+                a = v
+            else:
+                v = np.inf
+            rho = a + max(2 * eta, min(4 * eta, 0.5 * (v - a)))
             return sigma + side * rho, side, "single"
 
         lo, hi = plan(-1), plan(1)
@@ -685,7 +710,7 @@ class Solver:
         return lo, hi
 
     def _certify_nearest_mixed(self, F, s_used, sigma, k, lam, X, block, spec=None):
-        """混合精度完备性证书。返回 (是否已出结论, lam, X)；未出结论时由双精度内窗口证书接手。
+        """混合精度完备性证书。返回 (是否已出结论, lam, X, F)；未出结论时由双精度内窗口证书接手。
 
         端点规划见 _plan_mixed。计数 = 窗口内已得个数且单精度端点 η 邻域内无已得特征值
         ⇒ 收缩窗口 (x_lo+η_lo, x_hi−η_hi) 内无遗漏，它覆盖 |λ−σ| < r_k − τ。
@@ -695,7 +720,7 @@ class Solver:
         o = self.o
         plan = self._plan_mixed(sigma, k, lam, self._ritz)
         if plan is None:
-            return False, lam, X
+            return False, lam, X, F
         lo, hi = plan
         res = None
         if spec and spec.get("futs"):
@@ -709,6 +734,8 @@ class Solver:
                 res, lo, hi = got, (xs_lo, -1, "single"), (xs_hi, 1, "single")
                 self.rep.diagnostics.append("[并行] 证书计数在 Krylov 迭代中途按 Ritz 值提前启动，端点经核对有效")
         if res is None:
+            if not self._parallel and "double" in (lo[2], hi[2]):
+                F.free()     # 双精度端点复用位移分解的槽；补解时再数值重分解
             res = self.counts([(x, INF, d, pr) for (x, d, pr) in (lo, hi)])
         (n_lo, x_lo), (n_hi, x_hi) = res
         e_lo = self.eta(x_lo, "single") if lo[2] == "single" else 0.0
@@ -717,7 +744,7 @@ class Solver:
         for rnd in range(o.max_rounds):
             if (e_lo and np.any(np.abs(lam - x_lo) <= e_lo)) or (e_hi and np.any(np.abs(lam - x_hi) <= e_hi)):
                 self.rep.diagnostics.append("[证书] 单精度计数端点的 η 邻域内有特征值，改用双精度计数")
-                return False, lam, X
+                return False, lam, X, F
             found_in = int(np.sum((lam > x_lo) & (lam < x_hi)))
             rk = float(np.abs(lam[:k] - sigma).max())
             self.rep.certificate = dict(round=rnd, kind="mixed-window", count_precision=[lo[2], hi[2]], window=[x_lo, x_hi],
@@ -727,27 +754,28 @@ class Solver:
                 rk = float(np.abs(lam[:k] - sigma).max())
                 need = rk - max(1e-7 * rk, 1e-11 * self.nA)
                 if not (x_lo + e_lo <= sigma - need and x_hi - e_hi >= sigma + need):
-                    return False, lam, X
+                    return False, lam, X, F
                 self.rep.certified = True
                 self.rep.certificate["r_k"] = rk
                 self._known = (x_lo + e_lo, x_hi - e_hi, lam[(lam > x_lo) & (lam < x_hi)])
                 self._tie_note(lam, k)
-                return True, lam, X
+                return True, lam, X, F
             if inside < found_in:
                 self.rep.diagnostics.append(f"[证书] 计数 {inside} < 窗口内已得 {found_in}，改用双精度内窗口")
-                return False, lam, X
+                return False, lam, X, F
             missing = inside - found_in
             if missing > max(k, 16):    # 窗口外缘吞入了大簇：交给双精度内窗口证书
                 self.rep.diagnostics.append(f"[证书] 窗口比已得多 {missing} 个（大簇贴近窗口边缘），改用双精度内窗口")
-                return False, lam, X
+                return False, lam, X, F
             block = min(max(block, missing + 1), 16)
             self.rep.diagnostics.append(f"[完备性] 第 {rnd} 轮：窗口惯性计数 {inside} > 已得 {found_in}，"
                                         f"补解 {missing} 个（重特征值/密集谱）→ 收缩已得向量，块尺寸 {block} 继续")
+            F = self._ensure_factor(F, s_used)
             X2 = self._shift_invert(F, s_used, missing, "nearest", locked=X, block=block)
             lam, X = self._refine(F, np.hstack([X, X2]))
             lam, X = self._order(lam, X, sigma, "nearest")
         self.rep.certified = False
-        return True, lam, X
+        return True, lam, X, F
 
     def _tie_note(self, lam, k):
         """第 k 个特征值是重特征值且部分副本落在前 k 个之外时说明（并列者任取其一均正确）。"""

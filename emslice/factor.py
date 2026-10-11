@@ -109,6 +109,8 @@ class Factorization:
     def __init__(self, n, cplx, sigma):
         self.n, self.cplx, self.sigma = n, cplx, sigma
         self.stats: dict = {}
+        self.freed = False
+        self.on_free = None     # 释放时回调（求解器据此知道常驻槽已空闲）
 
     def solve(self, X):
         X = np.asarray(X)
@@ -307,6 +309,9 @@ class PetscMumpsFactor(Factorization):
         if self._owned and self._slot is not None:
             self._slot.destroy()
         self._slot = None
+        if not self.freed and self.on_free is not None:
+            self.on_free()
+        self.freed = True
 
 
 # --------------------------------------------------------------------- SciPy
@@ -330,6 +335,7 @@ class SuperLUFactor(Factorization):
 
     def free(self):
         self._lu = None
+        self.freed = True
 
 
 # ------------------------------------------------------------------ 调度入口

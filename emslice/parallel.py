@@ -54,7 +54,7 @@ def _set_threads(threads):
         for slot in s._slots.values():
             slot.destroy()
         s._slots.clear()
-        s._thr_fac = s._thr_solve = _Threads(threads)
+        s._thr_fac = s._thr_solve = s._thr_cnt = _Threads(threads)
         _W["threads"] = threads
     return s
 
