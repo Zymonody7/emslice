@@ -715,18 +715,21 @@ class Solver:
             d = np.abs(lam - sigma)[np.sign(lam - sigma) == side]
             rd = np.abs(ritz - sigma)[np.sign(ritz - sigma) == side]
             ties = (rd > rk - 2 * eta) & (rd <= rk + 2 * eta)
-            if np.any(ties):
-                if not (expensive and ties.sum() <= 8):
-                    return sigma + side * (rk - tau), 0, "double"
-                d = np.concatenate([d, rd[ties]])   # 当作“将被补解求出”的特征值划入窗口
-                rd = rd[~ties]
+            budget = 8 if expensive else 0          # 可并入窗口、交给补解的未求出估计值个数
+            if ties.sum() > budget:
+                return sigma + side * (rk - tau), 0, "double"
+            budget -= int(ties.sum())
+            d = np.concatenate([d, rd[ties]])       # 当作“将被补解求出”的特征值划入窗口
+            rd = rd[~ties]
             pts = sorted([(v, True) for v in d[d > rk]] + [(v, False) for v in rd[rd > rk]])
             a = rk
             for v, found in pts:
                 if v - a >= 4 * eta:
                     break
                 if not found:
-                    return sigma + side * (rk - tau), 0, "double"
+                    if budget <= 0:
+                        return sigma + side * (rk - tau), 0, "double"
+                    budget -= 1
                 a = v
             else:
                 v = np.inf
