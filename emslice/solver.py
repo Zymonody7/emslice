@@ -641,11 +641,7 @@ class Solver:
                 spec["plan"] = plan
                 if plan is not None and plan[0][2] == plan[1][2] == "single":
                     spec["futs"] = [self.pool.submit(x, INF, d, pr) for (x, d, pr) in plan]
-        # 分解昂贵（首次分解 ≥4 s，如复厄密周期问题）且要出混合精度证书时，主 Krylov 多求一个块：第 k 个附近的
-        # 简并副本与紧邻特征值多半直接收敛为“已得”，证书端点可放进真实谱间隙、两侧都用单精度计数——
-        # 多出的 Krylov（约 +20–30%）远小于一次双精度计数比单精度多出的时间（鲲鹏复厄密十万阶约 23 s）
-        extra = (o.block or 8) if (o.verify and self.count_prec == "single" and self._first_factor_seconds() >= 4.0) else 0
-        lam, X = self._refine(F, self._shift_invert(F, s_used, k + extra, "nearest", monitor=monitor))
+        lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest", monitor=monitor))
         lam, X = self._order(lam, X, sigma, "nearest")
         rk = float(np.abs(lam[:k] - sigma).max()) if lam.size else 0.0
         too_far = abs(s_used - sigma) > 1e-2 * rk
@@ -804,10 +800,7 @@ class Solver:
             rho = a + max(2 * eta, min(4 * eta, 0.5 * (v - a)))
             return sigma + side * rho, side, "single"
 
-        lo, hi = plan(-1), plan(1)
-        if lo[2] == hi[2] == "double":
-            return None
-        return lo, hi
+        return plan(-1), plan(1)
 
     def _certify_nearest_mixed(self, F, s_used, sigma, k, lam, X, block, spec=None):
         """混合精度完备性证书。返回 (是否已出结论, lam, X, F)；未出结论时由双精度内窗口证书接手。
@@ -819,7 +812,19 @@ class Solver:
         """
         o = self.o
         plan = self._plan_mixed(sigma, k, lam, self._ritz, self._absorb_budget())
-        if plan is None:
+        ks0 = self.rep.krylov_runs[0]["seconds"] if self.rep.krylov_runs else np.inf
+        if (plan is not None and "double" in (plan[0][2], plan[1][2]) and not self._parallel
+                and 0.4 * self._first_factor_seconds() > ks0):
+            # 按需扩展：一侧因 r_k 附近未求出的估计值（多为第 k 个的简并副本）被迫双精度，而该侧改用单精度省下的时间
+            # （≈半次数值分解）超过整轮主 Krylov 时，收缩已得向量再求一个块，让它们收敛为“已得”后重新规划
+            # （鲲鹏 Bloch 复厄密：两侧由 d/s 变为 s/s，149 → 128 s）
+            p = o.block or 8
+            X2 = self._shift_invert(F, s_used, p, "nearest", locked=X, block=p)
+            lam, X = self._refine(F, np.hstack([X, X2]))
+            lam, X = self._order(lam, X, sigma, "nearest")
+            self.rep.diagnostics.append(f"[证书] 第 k 个附近有未求出的简并副本，补求 {p} 个后重新规划单精度计数端点")
+            plan = self._plan_mixed(sigma, k, lam, self._ritz, self._absorb_budget())
+        if plan is None or plan[0][2] == plan[1][2] == "double":
             return False, lam, X, F
         lo, hi = plan
         if (not self._parallel and (lo[2] == "double") != (hi[2] == "double") and "single" not in self._slots
