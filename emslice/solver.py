@@ -549,11 +549,28 @@ class Solver:
         th = np.real(th[np.abs(th) > 0])
         self._ritz = shift + 1.0 / th
         self._ritz_vecs = r.X_extra
+        # 停滞提前返回时未收敛的期望 Ritz 向量：收缩补解的初始块（见 _warm_block）
+        self._unconv_vecs = r.X[:, ~r.conv_mask] if 0 < nconv < r.X.shape[1] else None
         self.rep.krylov_runs.append(dict(shift=shift, nev=nev, which=ks_which, block=p, ncv=ncv, restarts=r.restarts,
                                          n_apply=r.n_apply, converged=r.converged, nconv=nconv, seconds=dt,
                                          locked=0 if locked is None else int(locked.shape[1])))
         # 只保留已收敛的 Ritz 向量；若一个都没收敛则全部保留（交给 Rayleigh-Ritz/逆迭代精化）
         return r.X[:, r.conv_mask] if nconv else r.X
+
+    def _warm_block(self, p):
+        """Krylov 因停滞只返回部分收敛对后的补解初始块：一半取上一轮未收敛 Ritz 向量的随机组合（已部分收敛，
+        补解从这里起步而不是从头重建子空间），一半随机——停滞也可能来自重数超过块尺寸的简并特征值，
+        其余副本不在上一轮的 Krylov 子空间里，只能由随机方向带入。"""
+        U = getattr(self, "_unconv_vecs", None)
+        if U is None or p < 2:
+            return None
+        rng = np.random.default_rng(self.o.seed + 7919 * len(self.rep.krylov_runs))
+        h = p // 2
+        W = U @ rng.standard_normal((U.shape[1], h))
+        R = rng.standard_normal((self.n, p - h))
+        if self.cplx:
+            R = R + 1j * rng.standard_normal((self.n, p - h))
+        return np.hstack([W, R.astype(W.dtype)])
 
     def _ks(self, op, nev, ks_which, p, ncv, locked, F, v0=None, monitor=None):
         B = self.B
@@ -730,7 +747,8 @@ class Solver:
             # Krylov 因停滞只返回了部分收敛对：收缩已得向量，补足 k 个（证书之前）
             need = k - lam.size
             block = min(max(block, need), 16)
-            X2 = self._shift_invert(F, s_used, need, "nearest", locked=X if lam.size else None, block=block)
+            X2 = self._shift_invert(F, s_used, need, "nearest", locked=X if lam.size else None, block=block,
+                                    v0=self._warm_block(block))
             lam, X = self._refine(F, np.hstack([X, X2]) if lam.size else X2)
             lam, X = self._order(lam, X, sigma, "nearest")
         if not o.verify:
@@ -1164,7 +1182,8 @@ class Solver:
             missing = cnt - lam.size
             blk = min(max(self.o.block or 8, missing + 1), 16)
             self.rep.diagnostics.append(f"[完备性] 切片 [{sa:.6g},{sb:.6g}) 惯性计数 {cnt}，已得 {lam.size}，收缩后继续（块 {blk}）")
-            X2 = self._shift_invert(F, s_used, missing, "nearest", locked=X if lam.size else None, block=blk)
+            X2 = self._shift_invert(F, s_used, missing, "nearest", locked=X if lam.size else None, block=blk,
+                                    v0=self._warm_block(blk))
             lam, X = self._refine(F, np.hstack([X, X2]) if lam.size else X2)
             amb = max(amb, ambiguous(lam))
             inside = (lam > sa) & (lam < sb)
