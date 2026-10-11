@@ -12,9 +12,16 @@
 
 固定稀疏结构：ShiftedPattern 预先取 pattern(A) ∪ pattern(B) ∪ diag，对任意 σ 只改数值，
 因此 MUMPS 的排序与符号分解（JOB=1）可在多次惯性计数间复用，只做数值分解。
+
+混合精度：只要惯性的分解可用单精度 LDLᵀ（PETSc -pc_precision single，MUMPS smumps）。
+由 Sylvester 定理，单精度分解给出的是邻近矩阵 A − xB + E 的精确惯性，‖E‖ 量级为 u_s·‖A − xB‖；
+因此计数点与所有特征值的距离大于 η = SINGLE_ETA·u_s·(‖A‖ + |x|‖B‖) 时计数精确
+（鲲鹏实测：距离 ≥ 1e-6·(‖A‖+|x|‖B‖) 时单精度与双精度计数逐一相同，1e-7 起开始出错；SINGLE_ETA=100 留出 5–60 倍余量）。
+证书逻辑据此只对“收缩 η 后的窗口”下结论，见 solver.py。
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import time
@@ -26,6 +33,16 @@ import scipy.sparse.linalg as spla
 
 class NearSingularError(RuntimeError):
     pass
+
+
+U_SINGLE = float(np.finfo(np.float32).eps)
+SINGLE_ETA = 100.0
+
+
+def count_eta(precision: str, nS: float) -> float:
+    """惯性计数的不确定半径 η（特征值单位）：|λ − x| > η 的特征值一定被正确计数。
+    双精度沿用零主元阈值的量级（1e-10·‖S‖ 内视为近奇异并扰动），单精度见模块说明。"""
+    return (SINGLE_ETA * U_SINGLE if precision == "single" else 1e-12) * nS
 
 
 def real_embedding(S):
@@ -149,13 +166,25 @@ def _petsc():
     return PETSc
 
 
+_SLOT_IDS = itertools.count()
+
+
+def resolve_ordering(ordering: str, pattern: ShiftedPattern) -> int:
+    """MUMPS 排序（ICNTL(7)）。auto：实矩阵用 SCOTCH，复厄密实嵌入用 METIS。
+    鲲鹏 8 线程实测（n≈10 万）：实数 Yee 矩阵上 SCOTCH 的分析耗时 0.4 s vs METIS 0.9 s，且填充/浮点数相当或更少；
+    21 万阶实嵌入上 METIS 浮点数少 10%，数值分解（20 s 级）收益超过分析耗时差。"""
+    if ordering == "auto":
+        return 5 if pattern.cplx else 3
+    return PetscSlot.ORDERINGS[ordering]
+
+
 class PetscSlot:
     """一套 PETSc Mat + KSP(Cholesky/MUMPS)。同一稀疏结构上重复分解时复用符号分析。"""
 
-    ORDERINGS = {"auto": 7, "amd": 0, "amf": 2, "scotch": 3, "pord": 4, "metis": 5, "qamd": 6}
+    ORDERINGS = {"mumps-auto": 7, "amd": 0, "amf": 2, "scotch": 3, "pord": 4, "metis": 5, "qamd": 6}
 
     def __init__(self, pattern: ShiftedPattern, ordering="auto", ooc=False, null_tol=None, mem_relax=40, blr=None,
-                 count_only=False):
+                 count_only=False, precision="double"):
         PETSc = self.PETSc = _petsc()
         it = PETSc.IntType
         self.indptr = pattern.indptr.astype(it)
@@ -165,14 +194,21 @@ class PetscSlot:
         self.mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
         self.mat.assemble()
         ksp = self.ksp = PETSc.KSP().create(comm=PETSc.COMM_SELF)
+        # 每个槽独立的选项前缀：-pc_precision 只作用于本槽（PETSc 在 setUp 时才读取，故选项保留到 destroy）
+        self._prefix = f"emslice{next(_SLOT_IDS)}_"
+        ksp.setOptionsPrefix(self._prefix)
         ksp.setOperators(self.mat)
         ksp.setType("preonly")
         pc = ksp.getPC()
         pc.setType("cholesky")
         pc.setFactorSolverType("mumps")
+        self.precision = precision
+        if precision == "single":
+            PETSc.Options()[self._prefix + "pc_precision"] = "single"
+            pc.setFromOptions()
         pc.setFactorSetUpSolverType()
         F = self.F = pc.getFactorMatrix()
-        F.setMumpsIcntl(7, self.ORDERINGS.get(ordering, 7))
+        F.setMumpsIcntl(7, resolve_ordering(ordering, pattern))
         F.setMumpsIcntl(13, 1)        # 根节点不并行化，保证惯性可得
         F.setMumpsIcntl(14, mem_relax)
         F.setMumpsIcntl(24, 1)        # 零主元检测
@@ -185,9 +221,10 @@ class PetscSlot:
             F.setMumpsCntl(7, float(blr))
         if count_only:
             # 只要惯性：分解后丢弃因子（ICNTL(31)=1），内存约降一半；
-            # 近奇异改用相对阈值零主元检测（|主元| ≤ 1e-10·‖A‖ 视为零），实测可识别 1e-13 相对距离内的特征值
+            # 近奇异改用相对阈值零主元检测（|主元| ≤ 1e-10·‖A‖ 视为零），实测可识别 1e-13 相对距离内的特征值；
+            # 单精度阈值放宽到 1e-6（≈ 17u_s），与计数不确定半径 η 同量级
             F.setMumpsIcntl(31, 1)
-            F.setMumpsCntl(3, 1e-10 if null_tol is None else null_tol)
+            F.setMumpsCntl(3, (1e-6 if precision == "single" else 1e-10) if null_tol is None else null_tol)
         self.analyzed = False
         self.ooc, self.blr, self.count_only = ooc, blr, count_only
 
@@ -222,6 +259,8 @@ class PetscSlot:
             self.ksp.destroy()
             self.mat.destroy()
             self.ksp = self.mat = self.F = None
+            if self.precision == "single":
+                self.PETSc.Options().delValue(self._prefix + "pc_precision")
 
 
 class PetscMumpsFactor(Factorization):
@@ -250,6 +289,8 @@ class PetscMumpsFactor(Factorization):
             null_pivots=int(infog(28)),
             ooc=bool(self._slot.ooc),
             blr=self._slot.blr,
+            precision=self._slot.precision,
+            ordering=int(infog(7)),
         )
         self.stats["count_only"] = bool(self._slot.count_only)
         if not self._slot.count_only:  # 因子已丢弃的计数分解无法求解，近奇异由零主元检测负责
@@ -304,13 +345,13 @@ def available_backends():
 
 
 def factorize(pattern: ShiftedPattern, sigma, backend="auto", ordering="auto", ooc="auto", need_solve=True,
-              slot: PetscSlot | None = None, nS=None, blr=None, **_):
+              slot: PetscSlot | None = None, nS=None, blr=None, precision="double", **_):
     if backend == "auto":
         backend = available_backends()[0]
     use_ooc = bool(ooc) if ooc != "auto" else False
     if backend == "petsc":
         return PetscMumpsFactor(pattern, sigma, slot=slot, need_solve=need_solve, nS=nS, ordering=ordering,
-                                ooc=use_ooc, blr=blr)
+                                ooc=use_ooc, blr=blr, precision=precision)
     if backend == "scipy":
         return SuperLUFactor(pattern, sigma, need_solve=need_solve, nS=nS)
     raise ValueError(f"未知后端 {backend}")

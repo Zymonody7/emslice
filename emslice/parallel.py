@@ -36,7 +36,7 @@ def _init(A, B, opts: dict, threads=1, warm=False):
     _set_threads(threads)
     if warm:  # 预做符号分析：在远离谱的位移处做一次计数分解（结果丢弃）
         try:
-            s.count_below(-1.1 * s.nA / max(s.nB, 1e-300))
+            s.count_below(-1.1 * s.nA / max(s.nB, 1e-300), prec=s.count_prec)
         except Exception:  # pragma: no cover - 预热失败不影响后续计数
             pass
         s.rep.factorizations.clear()
@@ -51,25 +51,25 @@ def _set_threads(threads):
     s = _W["solver"]
     threads = max(1, int(threads))
     if _W.get("threads") != threads:
-        if s._slot is not None:
-            s._slot.destroy()
-            s._slot = None
+        for slot in s._slots.values():
+            slot.destroy()
+        s._slots.clear()
         s._thr_fac = s._thr_solve = _Threads(threads)
         _W["threads"] = threads
     return s
 
 
-def _count(x, max_delta, direction, threads=1):
+def _count(x, max_delta, direction, prec="double", threads=1):
     s = _set_threads(threads)
     nf, nd = len(s.rep.factorizations), len(s.rep.diagnostics)
-    n, xu = s.count_below(x, max_delta=max_delta, direction=direction)
+    n, xu = s.count_below(x, max_delta=max_delta, direction=direction, prec=prec)
     return n, xu, s.rep.factorizations[nf:], s.rep.diagnostics[nd:], os.getpid()
 
 
-def _slice(sa, sb, ca, cb, threads=1):
+def _slice(sa, sb, ca, cb, ea=0.0, eb=0.0, threads=1):
     s = _set_threads(threads)
     nf, nk, nd = len(s.rep.factorizations), len(s.rep.krylov_runs), len(s.rep.diagnostics)
-    lam, X = s._solve_one_slice(sa, sb, ca, cb)
+    lam, X = s._solve_one_slice(sa, sb, ca, cb, ea, eb)
     return lam, X, s.rep.factorizations[nf:], s.rep.krylov_runs[nk:], s.rep.diagnostics[nd:], os.getpid()
 
 
@@ -106,11 +106,11 @@ class CountPool:
             # 预热：子进程在主进程做第一次分解的同时完成启动与矩阵加载（进程在 submit 时同步创建）
             self._warm = [self.ex.submit(_ping) for _ in range(workers)]
 
-    def submit(self, x, max_delta=float("inf"), direction=0):
-        return self.ex.submit(_count, x, max_delta, direction, self.threads)
+    def submit(self, x, max_delta=float("inf"), direction=0, prec="double"):
+        return self.ex.submit(_count, x, max_delta, direction, prec, self.threads)
 
-    def submit_slice(self, sa, sb, ca, cb):
-        return self.ex.submit(_slice, sa, sb, ca, cb, self.threads)
+    def submit_slice(self, sa, sb, ca, cb, ea=0.0, eb=0.0):
+        return self.ex.submit(_slice, sa, sb, ca, cb, ea, eb, self.threads)
 
     def close(self):
         self.ex.shutdown(wait=True, cancel_futures=True)
@@ -164,11 +164,11 @@ class AsyncCountPool:
         self._dispatch(meth, args, outer)
         return outer
 
-    def submit(self, x, max_delta=float("inf"), direction=0):
-        return self._enqueue("submit", (x, max_delta, direction))
+    def submit(self, x, max_delta=float("inf"), direction=0, prec="double"):
+        return self._enqueue("submit", (x, max_delta, direction, prec))
 
-    def submit_slice(self, sa, sb, ca, cb):
-        return self._enqueue("submit_slice", (sa, sb, ca, cb))
+    def submit_slice(self, sa, sb, ca, cb, ea=0.0, eb=0.0):
+        return self._enqueue("submit_slice", (sa, sb, ca, cb, ea, eb))
 
     def close(self):
         self._t.join()

@@ -31,7 +31,7 @@ try:
         out.update(certified=rep.certified, n_factor=len(rep.factorizations),
                    n_apply=sum(r["n_apply"] for r in rep.krylov_runs), diagnostics=rep.diagnostics,
                    timings=rep.timings, workers=rep.workers,
-                   factor_log=[(f["purpose"], round(f.get("seconds_factor", 0), 2), f.get("worker", 0), f.get("symbolic_reused")) for f in rep.factorizations],
+                   factor_log=[(f["purpose"], round(f.get("seconds_factor", 0), 2), f.get("worker", 0), f.get("symbolic_reused"), f.get("precision", "double")[0]) for f in rep.factorizations],
                    krylov_log=[(r["nev"], r["block"], r["ncv"], r["n_apply"], r["restarts"], r["nconv"], round(r["seconds"], 2)) for r in rep.krylov_runs])
     else:
         from bench.baselines import run_baseline
