@@ -117,7 +117,9 @@ def krylov_schur(
     locked: np.ndarray | None = None,
     v0: np.ndarray | None = None,
     seed: int = 0,
+    monitor: Callable | None = None,
 ) -> KSResult:
+    """monitor(theta, resid, nev)：每次重启前回调（期望的 Ritz 值在前），供上层提前启动与迭代无关的工作。"""
     rng = np.random.default_rng(seed)
     inner = _Inner(B)
     p = max(1, int(block))
@@ -189,6 +191,8 @@ def krylov_schur(
             dom = np.abs(theta) >= 0.5 * tmax
             floor[dom] = np.maximum(floor[dom], 10.0 * np.sqrt(m) * noise_rel * tmax)
         conv = resid <= np.maximum(tol * scale, floor)
+        if monitor is not None:
+            monitor(theta, resid, nev_eff)
         done = bool(np.all(conv[:nev_eff]))
         nconv_now = int(np.sum(conv[:nev_eff]))
         if nconv_now > best_nconv:

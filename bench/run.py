@@ -19,6 +19,22 @@ import json, sys, time, resource, os
 sys.path.insert(0, {root!r})
 import numpy as np
 case = json.loads(sys.argv[1]); solver = sys.argv[2]; extra = json.loads(sys.argv[3])
+import threading
+_peak = [0.0]
+def _sample():  # 进程树（主进程 + 惯性计数子进程）的 RSS 之和，每 50 ms 采样
+    try:
+        import psutil
+    except ImportError:
+        return
+    me = psutil.Process()
+    while True:
+        try:
+            tot = me.memory_info().rss + sum(c.memory_info().rss for c in me.children(recursive=True))
+        except Exception:
+            tot = 0
+        _peak[0] = max(_peak[0], tot / 2**20)
+        time.sleep(0.05)
+threading.Thread(target=_sample, daemon=True).start()
 from emslice.io import load_matrix
 A, info = load_matrix(case["matrix"])
 B = load_matrix(case["B"])[0] if case.get("B") else None
@@ -60,6 +76,7 @@ except Exception as e:
     out["error"] = f"{{type(e).__name__}}: {{e}}"
     out["seconds"] = time.perf_counter() - t0
 out["peak_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10)
+out["peak_tree_mb"] = round(_peak[0], 1) or None  # 含子进程的峰值（采样）
 print("@@RESULT" + json.dumps(out, default=str))
 """
 

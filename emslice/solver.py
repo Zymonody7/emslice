@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field, replace
 
@@ -87,6 +88,28 @@ def cpu_count() -> int:
         return os.cpu_count() or 2
 
 
+def physical_cores() -> int:
+    """可用物理核数：亲和集 ÷ 每核硬件线程数（SMT）。macOS 取性能核数——MUMPS 线程落到能效核上反而拖慢整体。"""
+    n = cpu_count()
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+
+            p = int(subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True,
+                                   timeout=2).stdout)
+            return max(1, min(p, n))
+        except Exception:
+            return max(1, n // 2)
+    try:
+        import psutil
+
+        lg, ph = psutil.cpu_count(logical=True), psutil.cpu_count(logical=False)
+        smt = max(1, round(lg / ph)) if lg and ph else 2
+    except Exception:  # pragma: no cover
+        smt = 2
+    return max(1, n // smt)
+
+
 class _Threads:
     """线程控制（threadpoolctl）：限制 MUMPS/OpenBLAS 的 OpenMP 线程数，缺失时不做限制。"""
 
@@ -143,11 +166,11 @@ class Solver:
         self.max_conc = 1
         self.conc = {"count": 1, "slice": 1}
         self._ritz = np.empty(0)   # 最近一次 Krylov 的额外 Ritz 值（λ 估计），用于判断证书端点外侧是否有干净间隙
-        # 线程预算：默认取物理核数估计（逻辑核/2，上限 8）；主进程与并发子任务按“预算 ÷ 并发数”分配
-        self.t_budget = int(self.o.threads or max(1, min(8, cpu_count() // 2)))
-        t_fac = min(self.t_budget, 4) if not self.o.threads else self.t_budget
-        # MUMPS 默认 L0-OpenMP 要求求解与分解线程数一致（否则 INFOG(1)=-58），两阶段用同一线程数；
-        # 进程池子进程各 1 线程，主进程 ≤4 线程，总线程数不超过核数（实测 8 线程会落到能效核反而变慢）
+        self._known = None         # 证书窗口 (lo, hi, 窗口内全部已得特征值)：窗口内无未知特征值，用于子空间夹角上界
+        # 线程预算：默认取可用物理核数（尊重 numactl/taskset 绑定；鲲鹏无超线程，x86 超线程按 2 折算）
+        self.t_budget = int(self.o.threads or min(physical_cores(), 64))
+        t_fac = self.t_budget
+        # MUMPS 默认 L0-OpenMP 要求求解与分解线程数一致（否则 INFOG(1)=-58），两阶段用同一线程数
         self._thr_fac = _Threads(t_fac)
         self._thr_solve = self._thr_fac
         self._thr_cnt = self._thr_fac   # 主进程计数槽的线程数（并发模式下固定为每进程份额，以复用符号分析）
@@ -176,11 +199,14 @@ class Solver:
         for attempt in range(8):
             x = shift + delta
             slot = None
-            if not keep and self.backend == "petsc":
-                if prec not in self._slots:
-                    self._slots[prec] = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=True,
-                                                  precision=prec)
-                slot = self._slots[prec]
+            if self.backend == "petsc":
+                # 同一稀疏结构的槽按用途常驻复用（只做数值分解）：保留因子的位移/切片分解一个槽，计数按精度各一个槽。
+                # 保留槽上同一时刻只有一个活的分解（调用方在下一次保留分解前已 free）
+                key = "keep" if keep else prec
+                if key not in self._slots:
+                    self._slots[key] = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=not keep,
+                                                 precision=prec, ooc=bool(self.o.ooc) if self.o.ooc != "auto" else False)
+                slot = self._slots[key]
             try:
                 with (self._thr_fac if keep else self._thr_cnt)():
                     F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=self.o.ooc,
@@ -249,42 +275,46 @@ class Solver:
             i += len(batch)
             futs = [self.pool.submit(*r) for r in batch[:n_work]]
             mine = [local(r) for r in batch[n_work:]]
-            for f in futs:
-                try:
-                    n, xu, facs, diags, pid = f.result()
-                except NearSingularError:
-                    if not safe:
-                        raise
-                    out.append(None)
-                    continue
-                for fa in facs:
-                    fa["worker"] = pid
-                self.rep.factorizations.extend(facs)
-                self.rep.diagnostics.extend(diags)
-                out.append((n, xu))
-                self._memory_guard(max((fa.get("mem_mb_used") or 0) for fa in facs) if facs else None, "count")
-            if futs:
-                self._workers_warm = True
+            out.extend(self._collect(f, safe) for f in futs)
             out.extend(mine)
         return out
+
+    def _collect(self, f, safe=False, purpose=None):
+        """取回子进程计数结果并记账（分解统计、诊断、内存守护）。"""
+        try:
+            n, xu, facs, diags, pid = f.result()
+        except NearSingularError:
+            if not safe:
+                raise
+            return None
+        for fa in facs:
+            fa["worker"] = pid
+            if purpose:
+                fa["purpose"] = purpose
+        self.rep.factorizations.extend(facs)
+        self.rep.diagnostics.extend(diags)
+        self._workers_warm = True
+        self._memory_guard(max((fa.get("mem_mb_used") or 0) for fa in facs) if facs else None, "count")
+        return n, xu
 
     def _start_pool(self):
         w = self.o.workers
         if w == "auto":
-            if self.n < 20000:  # 小规模分解只需毫秒级，进程池启动开销得不偿失
+            # 核数 < 16 时不开进程池：计数在主进程串行、用满全部线程并复用同一计数槽的符号分析，
+            # 比分给多个子进程（各自重做分析、每个只分到 2 线程）更快——鲲鹏 8 核实测两个子进程各 3.6–5.3 s，
+            # 主进程单精度数值分解 0.4 s + 一次分析 0.45 s
+            if self.n < 20000 or self.t_budget < 16:
                 return
-            w = max(1, min(3, self.t_budget // 2))   # 每个子进程至少 2 线程；8 核机器上为 2 个子进程
+            w = min(3, self.t_budget // 8)
         w = int(w)
         if w <= 1 or self.backend != "petsc" or (not self.o.verify and self.o.which == "nearest"):
             return
         from .parallel import AsyncCountPool
 
         # 每个子进程的线程数在池创建时固定（复用符号分析）；主进程参与计数时用同样的份额
-        thr = max(1, self.t_budget // w)
-        # nearest：子进程可在主进程分解 + Krylov 期间先做一次计数分解完成符号分析（petsc4py 不支持只做符号分析）。
-        # 只在核数富余时开启——8 核机器上它会与主进程争抢核与内存带宽，得不偿失
-        t_main = self._thr_fac.n
-        warm = bool(self.o.verify and self.o.which == "nearest" and cpu_count() >= t_main + 2 * w * thr)
+        thr = max(1, self.t_budget // (w + 1))
+        # nearest 模式的证书计数在 Krylov 迭代中途推测式提交（见 _solve_nearest），无需预热
+        warm = False
         self.pool = AsyncCountPool(self.A, self.B, asdict(self.o), w, threads=thr, warm=warm)
         self._parallel = True
         self._workers_warm = warm
@@ -334,8 +364,56 @@ class Solver:
         w, S = la.eigh(Hm, G)
         return w, X @ S
 
+    def _angle_bounds(self, lam, X):
+        """特征向量子空间夹角的后验上界（Davis–Kahan sinΘ 定理）。
+
+        把返回的特征值按 1e-8 相对容差分簇 C；对簇的 Ritz 向量 X_C（B-正交化）与残差 R_C = A X_C − B X_C Λ_C，
+          ‖sin Θ(X_C, 真实谱子空间)‖_F ≤ ‖B^{-1/2} R_C‖_F / δ_C，
+        δ_C 为簇到“簇外真实特征值”的距离。完备性证书保证窗口内的真实特征值都已求得（各在其 Ritz 值的残差半径内），
+        窗口外的特征值离簇至少到窗口边界的距离，因此 δ_C 有可靠下界——没有证书时这一下界无从得知。
+        落在证书窗口外的特征值（如与第 k 个并列、按内窗口证书接受的副本）不给上界。
+        广义问题以 λ_min(B) 的 Lanczos 估计折算 B^{-1/2}（估计值，报告中注明）。"""
+        lo, hi, known = self._known
+        known = np.sort(np.asarray(known, dtype=float))
+        bmin = 1.0
+        if self.B is not None:
+            try:
+                import scipy.sparse.linalg as spla
+
+                bmin = 0.5 * float(spla.eigsh(self.B, k=1, which="SA", tol=1e-3, return_eigenvectors=False)[0])
+            except Exception:
+                return dict(subspace_sin_bound_max=None)
+        tol_c = 1e-8 * max(np.abs(lam).max(), 1e-3 * self.nA)
+        cuts = np.flatnonzero(np.diff(lam) > tol_c) + 1
+        rmax = float(self.residuals(lam, X)[0].max()) / np.sqrt(bmin)
+        out = np.full(lam.size, np.nan)
+        for idx in np.split(np.arange(lam.size), cuts):
+            c_lo, c_hi = lam[idx[0]], lam[idx[-1]]
+            if not (lo < c_lo and c_hi < hi):
+                continue
+            others = known[(known < c_lo - tol_c) | (known > c_hi + tol_c)]
+            gaps = [c_lo - lo, hi - c_hi]
+            if others.size:
+                gaps.append(float(np.min(np.maximum(others - c_hi, c_lo - others))) - rmax)
+            delta = min(gaps)
+            if delta <= 0:
+                continue
+            Xc = X[:, idx]
+            BXc = Xc if self.B is None else self.B @ Xc
+            G = Xc.conj().T @ BXc
+            Lc = np.linalg.cholesky(0.5 * (G + G.conj().T))
+            Q = np.linalg.solve(Lc, Xc.conj().T).conj().T          # B-正交化
+            BQ = Q if self.B is None else self.B @ Q
+            Hc = Q.conj().T @ (self.A @ Q)
+            R = self.A @ Q - BQ @ (0.5 * (Hc + Hc.conj().T))
+            out[idx] = min(1.0, np.linalg.norm(R) / np.sqrt(bmin) / delta)
+        ok = out[np.isfinite(out)]
+        return dict(subspace_sin_bound_max=float(ok.max()) if ok.size else None,
+                    per_eig_subspace_sin_bound=[None if not np.isfinite(v) else float(v) for v in out],
+                    subspace_bound_kind="rigorous" if self.B is None else "estimate(λmin(B) Lanczos)")
+
     # ------------------------------------------------------- 一次位移-求逆求解
-    def _shift_invert(self, F, shift, nev, which, locked=None, block=None, v0=None):
+    def _shift_invert(self, F, shift, nev, which, locked=None, block=None, v0=None, monitor=None):
         B = self.B
 
         def op(X):
@@ -352,7 +430,7 @@ class Solver:
         ks_which = {"nearest": "LM", "above": "LA", "below": "SA"}[which]
         t = time.perf_counter()
         with self._thr_solve():
-            r = self._ks(op, nev, ks_which, p, ncv, locked, F, v0)
+            r = self._ks(op, nev, ks_which, p, ncv, locked, F, v0, monitor)
         dt = time.perf_counter() - t
         nconv = int(r.conv_mask.sum())
         th = np.concatenate([r.theta_extra, r.theta[~r.conv_mask]]) if r.conv_mask.size else r.theta_extra
@@ -364,14 +442,14 @@ class Solver:
         # 只保留已收敛的 Ritz 向量；若一个都没收敛则全部保留（交给 Rayleigh-Ritz/逆迭代精化）
         return r.X[:, r.conv_mask] if nconv else r.X
 
-    def _ks(self, op, nev, ks_which, p, ncv, locked, F, v0=None):
+    def _ks(self, op, nev, ks_which, p, ncv, locked, F, v0=None, monitor=None):
         B = self.B
         if v0 is not None and v0.shape[1] > p:   # 热启动：把已得近似子空间压成 p 个起始向量
             v0 = v0 @ np.random.default_rng(self.o.seed).standard_normal((v0.shape[1], p))
         return krylov_schur(op, self.n, nev, dtype=self.dtype, which=ks_which, block=p, ncv=ncv, v0=v0,
                             tol=max(self.o.tol * 0.1, 1e-14), B=B, locked=locked,
                             seed=self.o.seed + len(self.rep.krylov_runs),
-                            noise_rel=np.finfo(float).eps * F.stats.get("growth", 1.0))
+                            noise_rel=np.finfo(float).eps * F.stats.get("growth", 1.0), monitor=monitor)
 
     def _refine(self, F, X):
         """Rayleigh-Ritz + 至多 refine_steps 次块逆迭代，把残差压到 tol 以下。"""
@@ -417,6 +495,8 @@ class Solver:
         self.rep.residuals = dict(abs_max=float(rn.max(initial=0)), backward_max=float(back.max(initial=0)),
                                   rel_max=float(rel.max(initial=0)), per_eig_backward=back.tolist(),
                                   tol=o.tol, all_below_tol=bool(np.all(back <= o.tol)))
+        if self.rep.certified and self._known is not None and lam.size:
+            self.rep.residuals.update(self._angle_bounds(lam, X))
         self.rep.timings["total"] = time.perf_counter() - t0
         fz = self.rep.factorizations
         self.rep.timings["factor_sum"] = float(sum(f.get("seconds_factor", 0) for f in fz))
@@ -484,7 +564,20 @@ class Solver:
         F, s_used = self._factor(sigma + self.PRE_OFFSET * scale, "shift", keep=True)
         self.rep.shifts.append(s_used)
         self._memory_guard(F.stats.get("mem_mb_used"))
-        lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest"))
+        spec = {}
+        monitor = None
+        if o.verify and self.count_prec == "single" and self._parallel:
+            def monitor(theta, resid, nev):
+                """推测式证书计数：期望的 Ritz 值稳定（相对残差 ≤ 1e-6）后按估计窗口提前提交单精度计数，
+                与剩余 Krylov 迭代重叠；收敛后核对端点仍有效才采用（见 _certify_nearest_mixed）。"""
+                if spec or not np.all(resid[:nev] <= 1e-6 * np.abs(theta[:nev])):
+                    return
+                th, te = np.real(theta[:nev]), np.real(theta[nev:])
+                plan = self._plan_mixed(sigma, k, s_used + 1.0 / th[th != 0], s_used + 1.0 / te[te != 0])
+                spec["plan"] = plan
+                if plan is not None and plan[0][2] == plan[1][2] == "single":
+                    spec["futs"] = [self.pool.submit(x, INF, d, pr) for (x, d, pr) in plan]
+        lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest", monitor=monitor))
         lam, X = self._order(lam, X, sigma, "nearest")
         rk = float(np.abs(lam[:k] - sigma).max()) if lam.size else 0.0
         if lam.size and abs(s_used - sigma) > 1e-2 * rk and rk > 1e-11 * self.nA:
@@ -512,7 +605,7 @@ class Solver:
             F.free()
             return lam[:k], X[:, :k]
         if self.count_prec == "single":
-            done, lam, X = self._certify_nearest_mixed(F, s_used, sigma, k, lam, X, block)
+            done, lam, X = self._certify_nearest_mixed(F, s_used, sigma, k, lam, X, block, spec)
             if done:
                 F.free()
                 return lam[:k], X[:, :k]
@@ -532,6 +625,7 @@ class Solver:
                                         inertia_count=inside, found_in_window=found_in)
             if inside == found_in:
                 self.rep.certified = True
+                self._known = (x_lo, x_hi, lam[(lam > x_lo) & (lam < x_hi)])
                 break
             if inside < found_in:
                 self.rep.certified = False
@@ -549,26 +643,25 @@ class Solver:
         F.free()
         return lam[:k], X[:, :k]
 
-    def _certify_nearest_mixed(self, F, s_used, sigma, k, lam, X, block):
-        """混合精度完备性证书。返回 (是否已出结论, lam, X)；未出结论时由双精度内窗口证书接手。
+    def _plan_mixed(self, sigma, k, lam, ritz):
+        """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
 
-        单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。
-        两侧端点各自选择：
-          * 外端点（单精度）：x = σ ± ρ，ρ = r_k + 4η。适用于 r_k 之外有干净间隙——已得特征值在 r_k 处无重复副本，
+        单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。两侧各自选择：
+          * 外端点（单精度）：x = σ ± ρ，ρ = r_k + 4η。要求 r_k 之外有干净间隙——已得特征值在 r_k 处无重复副本，
             且 Krylov 的额外 Ritz 值显示 (r_k−2η, r_k+8η) 内没有未求出的特征值；
           * 内端点（双精度）：x = σ ± (r_k − τ)，τ = 1e-7·r_k（原方案；与第 k 个并列的特征值任取其一）。
-        计数 = 窗口内已得个数且单精度端点 η 邻域内无已得特征值 ⇒ 收缩窗口 (x_lo+η_lo, x_hi−η_hi) 内无遗漏，
-        它覆盖 |λ−σ| < r_k − τ。计数 > 已得：缺的特征值都在窗口内，收缩已得向量补解后与同一计数比较，无需重新分解。
-        两侧都需双精度时直接交给原证书流程。
         """
-        o = self.o
-        rk = float(np.abs(lam[:k] - sigma).max())
+        lam = np.asarray(lam, dtype=float)
+        if lam.size < k:
+            return None
+        rk = float(np.sort(np.abs(lam - sigma))[k - 1])
         eta = self.eta(abs(sigma) + 2 * rk, "single")
         tau = max(1e-7 * rk, 1e-11 * self.nA)
         if rk < 10 * eta:   # 目标簇贴近 σ（如 σ 落在零空间簇上）：单精度分辨率不够
-            return False, lam, X
-        ritz = self._ritz[np.isfinite(self._ritz)]
-        if ritz.size and lam.size:   # 去掉与已得特征值重合的 Ritz 值
+            return None
+        ritz = np.asarray(ritz, dtype=float)
+        ritz = ritz[np.isfinite(ritz)]
+        if ritz.size:   # 去掉与已得特征值重合的 Ritz 值
             ritz = ritz[np.min(np.abs(ritz[:, None] - lam[None, :]), axis=1) > 2 * eta]
 
         def plan(side):
@@ -587,8 +680,36 @@ class Solver:
 
         lo, hi = plan(-1), plan(1)
         if lo[2] == hi[2] == "double":
+            return None
+        return lo, hi
+
+    def _certify_nearest_mixed(self, F, s_used, sigma, k, lam, X, block, spec=None):
+        """混合精度完备性证书。返回 (是否已出结论, lam, X)；未出结论时由双精度内窗口证书接手。
+
+        端点规划见 _plan_mixed。计数 = 窗口内已得个数且单精度端点 η 邻域内无已得特征值
+        ⇒ 收缩窗口 (x_lo+η_lo, x_hi−η_hi) 内无遗漏，它覆盖 |λ−σ| < r_k − τ。
+        计数 > 已得：缺的特征值都在窗口内，收缩已得向量补解后与同一计数比较，无需重新分解。
+        spec：Krylov 迭代中途按 Ritz 值提前提交的计数；最终结果下端点仍满足规划条件时直接采用。
+        """
+        o = self.o
+        plan = self._plan_mixed(sigma, k, lam, self._ritz)
+        if plan is None:
             return False, lam, X
-        (n_lo, x_lo), (n_hi, x_hi) = self.counts([(lo[0], INF, lo[1], lo[2]), (hi[0], INF, hi[1], hi[2])])
+        lo, hi = plan
+        res = None
+        if spec and spec.get("futs"):
+            (xs_lo, _, _), (xs_hi, _, _) = spec["plan"]
+            rk = float(np.abs(lam[:k] - sigma).max())
+            el, eh = self.eta(xs_lo, "single"), self.eta(xs_hi, "single")
+            ok = (lo[2] == hi[2] == "single" and xs_lo + el < sigma - rk and xs_hi - eh > sigma + rk
+                  and not np.any(np.abs(lam - xs_lo) <= 2 * el) and not np.any(np.abs(lam - xs_hi) <= 2 * eh))
+            got = [self._collect(f, purpose="inertia(推测)" if ok else "inertia(推测,未采用)") for f in spec["futs"]]
+            if ok:
+                res, lo, hi = got, (xs_lo, -1, "single"), (xs_hi, 1, "single")
+                self.rep.diagnostics.append("[并行] 证书计数在 Krylov 迭代中途按 Ritz 值提前启动，端点经核对有效")
+        if res is None:
+            res = self.counts([(x, INF, d, pr) for (x, d, pr) in (lo, hi)])
+        (n_lo, x_lo), (n_hi, x_hi) = res
         e_lo = self.eta(x_lo, "single") if lo[2] == "single" else 0.0
         e_hi = self.eta(x_hi, "single") if hi[2] == "single" else 0.0
         inside = int(n_hi - n_lo)
@@ -597,6 +718,7 @@ class Solver:
                 self.rep.diagnostics.append("[证书] 单精度计数端点的 η 邻域内有特征值，改用双精度计数")
                 return False, lam, X
             found_in = int(np.sum((lam > x_lo) & (lam < x_hi)))
+            rk = float(np.abs(lam[:k] - sigma).max())
             self.rep.certificate = dict(round=rnd, kind="mixed-window", count_precision=[lo[2], hi[2]], window=[x_lo, x_hi],
                                         eta=[e_lo, e_hi], r_k=rk, inertia_count=inside, found_in_window=found_in)
             if inside == found_in:
@@ -607,6 +729,7 @@ class Solver:
                     return False, lam, X
                 self.rep.certified = True
                 self.rep.certificate["r_k"] = rk
+                self._known = (x_lo + e_lo, x_hi - e_hi, lam[(lam > x_lo) & (lam < x_hi)])
                 self._tie_note(lam, k)
                 return True, lam, X
             if inside < found_in:
@@ -790,6 +913,8 @@ class Solver:
                 ea = eb = 0.0
             self.rep.certificate.update(count_precision="single" if (ea or eb) else "double", eta=[ea, eb])
         self.rep.certified = bool(lam.size == total)
+        if self.rep.certified:
+            self._known = (xa + ea, xb - eb, lam)
         return lam, X
 
     def _solve_one_slice(self, sa, sb, ca, cb, ea=0.0, eb=0.0):

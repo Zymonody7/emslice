@@ -106,6 +106,30 @@ def test_nearest_certified_degenerate():
 
 
 @needs_inertia
+@pytest.mark.parametrize("precision", ["auto", "double"])
+def test_mixed_precision_certificate_and_angle_bound(precision):
+    """单精度计数的外窗口证书（含双精度对照）：结果与稠密真值一致，子空间夹角上界不小于真实夹角。"""
+    A, _ = preset("puck", 7)
+    w, V = np.linalg.eigh(A.toarray())
+    sigma = 150.0
+    lam, X, rep = Solver(A, None, Options(k=10, sigma=sigma, precision=precision)).solve()
+    ref = np.sort(w[np.argsort(np.abs(w - sigma))[:10]])
+    assert rep.certified and np.abs(np.sort(lam) - ref).max() < 1e-8 * w.max()
+    if precision == "auto":
+        assert "single" in rep.certificate["count_precision"]
+        assert any(f.get("precision") == "single" for f in rep.factorizations)
+    else:
+        assert all(f.get("precision", "double") == "double" for f in rep.factorizations)
+    bounds = rep.residuals["per_eig_subspace_sin_bound"]
+    for i in range(lam.size):
+        if bounds[i] is None:
+            continue
+        E = V[:, np.abs(w - lam[i]) < 1e-6 * w.max()]
+        x = X[:, i] / np.linalg.norm(X[:, i])
+        assert np.linalg.norm(x - E @ (E.T @ x)) <= bounds[i] + 1e-14
+
+
+@needs_inertia
 def test_above_skips_null_space():
     A, ev = _cube(6)
     phys = ev[ev > 1e-9]
