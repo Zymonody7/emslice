@@ -168,6 +168,7 @@ class Solver:
         self.max_conc = 1
         self.conc = {"count": 1, "slice": 1}
         self._ritz = np.empty(0)   # 最近一次 Krylov 的额外 Ritz 值（λ 估计），用于判断证书端点外侧是否有干净间隙
+        self._ritz_vecs = None     # 对应的下一批 Ritz 向量（按需补求时作初始块）
         self._known = None         # 证书窗口 (lo, hi, 窗口内全部已得特征值)：窗口内无未知特征值，用于子空间夹角上界
         # 线程预算：默认取可用物理核数（尊重 numactl/taskset 绑定；鲲鹏无超线程，x86 超线程按 2 折算）
         self.t_budget = int(self.o.threads or min(physical_cores(), 64))
@@ -491,6 +492,7 @@ class Solver:
         th = np.concatenate([r.theta_extra, r.theta[~r.conv_mask]]) if r.conv_mask.size else r.theta_extra
         th = np.real(th[np.abs(th) > 0])
         self._ritz = shift + 1.0 / th
+        self._ritz_vecs = r.X_extra
         self.rep.krylov_runs.append(dict(shift=shift, nev=nev, which=ks_which, block=p, ncv=ncv, restarts=r.restarts,
                                          n_apply=r.n_apply, converged=r.converged, nconv=nconv, seconds=dt,
                                          locked=0 if locked is None else int(locked.shape[1])))
@@ -819,7 +821,8 @@ class Solver:
             # （≈半次数值分解）超过整轮主 Krylov 时，收缩已得向量再求一个块，让它们收敛为“已得”后重新规划
             # （鲲鹏 Bloch 复厄密：两侧由 d/s 变为 s/s，149 → 128 s）
             p = o.block or 8
-            X2 = self._shift_invert(F, s_used, p, "nearest", locked=X, block=p)
+            # 以主 Krylov 子空间里的下一批 Ritz 向量作初始块：补求几乎从已收敛状态起步（随机初始块时实测与主 Krylov 一样贵）
+            X2 = self._shift_invert(F, s_used, p, "nearest", locked=X, block=p, v0=self._ritz_vecs)
             lam, X = self._refine(F, np.hstack([X, X2]))
             lam, X = self._order(lam, X, sigma, "nearest")
             self.rep.diagnostics.append(f"[证书] 第 k 个附近有未求出的简并副本，补求 {p} 个后重新规划单精度计数端点")

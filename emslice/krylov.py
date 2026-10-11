@@ -28,6 +28,7 @@ class KSResult:
     n_apply: int               # 算子作用的向量次数
     theta_extra: np.ndarray = field(default_factory=lambda: np.empty(0))  # 其余 Ritz 值（估计谱间隙用）
     conv_mask: np.ndarray = field(default_factory=lambda: np.empty(0, bool))  # 各期望 Ritz 对是否收敛
+    X_extra: np.ndarray | None = None  # 紧随其后的 p 个 Ritz 向量（未收敛的下一批近似，供后续补求作初始块）
 
 
 class _Inner:
@@ -212,6 +213,7 @@ def krylov_schur(
         stalled = restarts - last_gain >= (stall if nconv_now > 0 else 3 * stall)
         if done or stalled or restarts >= max_restarts:
             X = V[:, :m] @ S[:, :nev_eff]
+            X_extra = V[:, :m] @ S[:, nev_eff : nev_eff + p] if m > nev_eff else None
             return KSResult(
                 theta=theta[:nev_eff],
                 X=X,
@@ -221,6 +223,7 @@ def krylov_schur(
                 n_apply=n_apply,
                 theta_extra=theta[nev_eff:],
                 conv_mask=conv[:nev_eff].copy(),
+                X_extra=X_extra,
             )
 
         # 厚重启：保留 l 个 Ritz 向量（期望的 + 若干缓冲），l ≡ m (mod p)
