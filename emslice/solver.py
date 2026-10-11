@@ -599,7 +599,8 @@ class Solver:
                 if spec or not np.all(resid[:nev] <= 1e-6 * np.abs(theta[:nev])):
                     return
                 th, te = np.real(theta[:nev]), np.real(theta[nev:])
-                plan = self._plan_mixed(sigma, k, s_used + 1.0 / th[th != 0], s_used + 1.0 / te[te != 0])
+                plan = self._plan_mixed(sigma, k, s_used + 1.0 / th[th != 0], s_used + 1.0 / te[te != 0],
+                                        self._expensive(F))
                 spec["plan"] = plan
                 if plan is not None and plan[0][2] == plan[1][2] == "single":
                     spec["futs"] = [self.pool.submit(x, INF, d, pr) for (x, d, pr) in plan]
@@ -683,7 +684,11 @@ class Solver:
         F.free()
         return lam[:k], X[:, :k]
 
-    def _plan_mixed(self, sigma, k, lam, ritz):
+    def _expensive(self, F):
+        """数值分解是否占主导（flops/nnz 大，如复厄密周期问题）：此时省一次双精度分解远比多一轮 Krylov 补解划算。"""
+        return F.stats.get("flops", 0.0) >= 2e5 * self.pattern.indices.size
+
+    def _plan_mixed(self, sigma, k, lam, ritz, expensive=False):
         """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
 
         单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。
@@ -692,6 +697,8 @@ class Solver:
         （距两侧各 ≥ 2η，故 ρ − η > r_k）；已得特征值可以被划入窗口，未求出的估计值挡在间隙之前则该侧
         改用双精度内端点 x = σ ± (r_k − τ)，τ = 1e-7·r_k（与第 k 个并列的特征值任取其一）。
         估计不准只会造成计数多出（按“补解”处理）或回退双精度，不影响证书的正确性。
+        expensive（数值分解主导）时，r_k 处少量（≤8）未求出的简并副本不再迫使回退双精度：端点越过它们，
+        计数多出的副本由收缩补解求出——一轮补解只需几秒，双精度计数比单精度贵一倍（复厄密十万阶约多 20 s）。
         """
         lam = np.asarray(lam, dtype=float)
         if lam.size < k:
@@ -707,8 +714,12 @@ class Solver:
         def plan(side):
             d = np.abs(lam - sigma)[np.sign(lam - sigma) == side]
             rd = np.abs(ritz - sigma)[np.sign(ritz - sigma) == side]
-            if np.any((rd > rk - 2 * eta) & (rd <= rk + 2 * eta)):
-                return sigma + side * (rk - tau), 0, "double"
+            ties = (rd > rk - 2 * eta) & (rd <= rk + 2 * eta)
+            if np.any(ties):
+                if not (expensive and ties.sum() <= 8):
+                    return sigma + side * (rk - tau), 0, "double"
+                d = np.concatenate([d, rd[ties]])   # 当作“将被补解求出”的特征值划入窗口
+                rd = rd[~ties]
             pts = sorted([(v, True) for v in d[d > rk]] + [(v, False) for v in rd[rd > rk]])
             a = rk
             for v, found in pts:
@@ -736,7 +747,7 @@ class Solver:
         spec：Krylov 迭代中途按 Ritz 值提前提交的计数；最终结果下端点仍满足规划条件时直接采用。
         """
         o = self.o
-        plan = self._plan_mixed(sigma, k, lam, self._ritz)
+        plan = self._plan_mixed(sigma, k, lam, self._ritz, self._expensive(F))
         if plan is None:
             return False, lam, X, F
         lo, hi = plan
