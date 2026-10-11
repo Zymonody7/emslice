@@ -69,6 +69,16 @@ def _block_orth(W, inner, against, rng, tol=1e-10):
                 Q[:, j] -= Q[:, :j] @ c
                 R[:j, j] += c
         nrm = inner.norms(Q[:, j : j + 1])[0]
+        if against is not None and nrm < 0.5 * norms0[j]:
+            # 大幅抵消（DGKS 准则）：残余向量里对已有基的舍入级分量在归一化后会被放大 1/nrm 倍，
+            # 对整个基（含锁定集）与块内已正交的列再正交化一遍。基维数接近 n 时（小矩阵）不做这一步会丢失正交性，
+            # 残差估计与真实残差脱节（n=108、m=80 实测估计 3e-14、真实后向误差 6e-9）
+            _project_out(Q[:, j : j + 1], against, inner)
+            if j:
+                c = inner(Q[:, :j], Q[:, j : j + 1]).ravel()
+                Q[:, j] -= Q[:, :j] @ c
+                R[:j, j] += c
+            nrm = inner.norms(Q[:, j : j + 1])[0]
         if nrm <= tol * max(norms0[j], np.finfo(float).tiny):
             # 失效：不变子空间已到达，补一个随机正交方向，耦合系数为 0
             R[j, j] = 0.0

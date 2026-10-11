@@ -54,7 +54,7 @@ class Options:
     ooc: bool | str = "auto"
     threads: int | None = None
     seed: int = 0
-    refine_steps: int = 2
+    refine_steps: int = 6
     workers: int | str = "auto"     # 惯性计数并发进程数（auto = min(3, 线程预算/2)，每进程至少 2 线程）
     blr: float | None = None        # MUMPS 块低秩压缩精度（None = 关闭）
 
@@ -469,17 +469,26 @@ class Solver:
                             noise_rel=np.finfo(float).eps * F.stats.get("growth", 1.0), monitor=monitor)
 
     def _refine(self, F, X):
-        """Rayleigh-Ritz + 至多 refine_steps 次块逆迭代，把残差压到 tol 以下。"""
+        """Rayleigh-Ritz + 至多 refine_steps 次块逆迭代，把后向误差压到 tol 以下（达标即停，不再改善也停）。
+
+        位移贴近特征值时 Krylov 的收敛判据受噪声地板 ~ε·max|θ| 限制，远离位移的边界特征对可能只到 1e-8 量级；
+        块逆迭代（含块内 Rayleigh-Ritz）每步把它们再压低数倍（随机压力测试：σ 恰为特征值、k=20 时
+        8e-8 → 1e-8 → 3e-9 → 7e-10 → …），故最多做 refine_steps（默认 6）步。
+        （试过在 span[X, S⁻¹R] 上做残差校正：已收敛特征对的校正量只剩噪声，会引入伪 Ritz 值，不采用。）"""
         if self.B is None:
             X = np.linalg.qr(X)[0]
         lam, X = self.rayleigh_ritz(X)
+        _, back, _ = self.residuals(lam, X)
         for _ in range(self.o.refine_steps):
-            _, back, _ = self.residuals(lam, X)
             if back.max() <= self.o.tol:
                 break
             with self._thr_solve():
                 Y = F.solve(X if self.B is None else self.B @ X)
-            lam, X = self.rayleigh_ritz(np.linalg.qr(Y)[0])
+            lam2, X2 = self.rayleigh_ritz(np.linalg.qr(Y)[0])
+            _, back2, _ = self.residuals(lam2, X2)
+            if back2.max() >= back.max():
+                break
+            lam, X, back = lam2, X2, back2
         return lam, X
 
     # ------------------------------------------------------------------ 主入口
@@ -597,17 +606,26 @@ class Solver:
         lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest", monitor=monitor))
         lam, X = self._order(lam, X, sigma, "nearest")
         rk = float(np.abs(lam[:k] - sigma).max()) if lam.size else 0.0
-        if lam.size and abs(s_used - sigma) > 1e-2 * rk and rk > 1e-11 * self.nA:
+        too_far = abs(s_used - sigma) > 1e-2 * rk
+        # 位移紧贴特征值（σ 恰为谐振点）时，远处特征对受噪声地板 ~ε·max|θ| 所限，逆迭代精化后仍可能不达标：
+        # 改在 σ + 1e-3·r_k 处重分解（max|θ|/|θ_k| ≈ 1e3），只在确实未达标时付出这次分解
+        too_close = (abs(s_used - sigma) < 1e-3 * rk and lam.size
+                     and self.residuals(lam[:k], X[:, :k])[1].max() > o.tol)
+        if lam.size and (too_far or too_close) and rk > 1e-11 * self.nA:
             # 预偏移相对局部谱尺度过大（谱跨度极大的矩阵）：按局部尺度重分解，并以已得向量热启动
-            s_new = sigma + 1e-4 * rk * 0.6180339887
-            self.rep.diagnostics.append(f"[局部尺度] 预偏移 {s_used - sigma:.2e} 超过局部半径 r_k={rk:.3g} 的 1%，"
-                                        f"改用 σ+{s_new - sigma:.2e} 重分解")
+            s_new = sigma + (1e-4 if too_far else 1e-3) * rk * 0.6180339887
+            self.rep.diagnostics.append(
+                f"[局部尺度] 预偏移 {s_used - sigma:.2e} " + ("超过局部半径 r_k={:.3g} 的 1%".format(rk) if too_far else
+                                                         "使远处特征对精度受限（σ 贴近谐振点）") + f"，改用 σ+{s_new - sigma:.2e} 重分解")
             F.free()
             F, s_used = self._factor(s_new, "shift", keep=True)
             self.rep.shifts.append(s_used)
             X0 = X[:, : min(k, X.shape[1])]
+            old = (lam, X, self.residuals(lam[:k], X[:, :k])[1].max())
             lam, X = self._refine(F, self._shift_invert(F, s_used, k, "nearest", v0=X0))
             lam, X = self._order(lam, X, sigma, "nearest")
+            if too_close and lam.size >= k and self.residuals(lam[:k], X[:, :k])[1].max() > old[2]:
+                lam, X = old[0], old[1]   # 未改善（如 k 截断了近简并簇，残差下限由簇宽决定）：保留原结果
         block = o.block or 8
         for _ in range(o.max_rounds):
             if lam.size >= k:
@@ -722,6 +740,11 @@ class Solver:
         if plan is None:
             return False, lam, X, F
         lo, hi = plan
+        if (not self._parallel and (lo[2] == "double") != (hi[2] == "double") and "single" not in self._slots
+                and F.stats.get("flops", 0.0) < 2e5 * self.pattern.indices.size):
+            # 一侧必须双精度时，另一侧用单精度还要为单精度槽另做一次符号分析（耗时 ∝ nnz）；数值分解（∝ flops）
+            # 不占主导时（鲲鹏 8 核十万阶实矩阵：分析 0.75 s vs 单/双精度数值 0.7/1.4 s）两侧都在位移槽上做双精度更快
+            lo, hi = [(x, d, "double") for (x, d, _p) in (lo, hi)]
         res = None
         if spec and spec.get("futs"):
             (xs_lo, _, _), (xs_hi, _, _) = spec["plan"]
@@ -877,7 +900,9 @@ class Solver:
         eb = self.eta(xb, self.count_prec) if self.count_prec == "single" else 0.0
         a, b, na, nbb, ea_, eb_ = (x0, xb, n0, nb, 0.0, eb) if sgn > 0 else (xb, x0, nb, n0, eb, 0.0)
         lam, X = self._solve_range(a, b, na, nbb, ea_, eb_)
-        lam, X = self._order(lam, X, sigma, which)
+        # 以 σ 处实际计数点 x0 为界（σ 贴近特征值时 x0 已向“包含 σ”的一侧扰动）：与括区计数口径一致，
+        # 恰在 σ 上的特征值即使数值上落在 σ 另一侧 1e-16 处也计入
+        lam, X = self._order(lam, X, x0, which)
         return lam[:k], X[:, :k]
 
     @staticmethod
