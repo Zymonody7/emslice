@@ -47,7 +47,7 @@ class Options:
     ncv: int | None = None
     verify: bool = True             # 惯性完备性证书
     max_rounds: int = 8
-    slice_max: int = 48             # 区间模式下每个切片的最大特征值数
+    slice_max: int = 200            # 区间模式下每个切片的最大特征值数（鲲鹏 8 核：192 个特征值的区间 48→200 时 56.9→39.0 s）
     backend: str = "auto"
     precision: str = "auto"         # 惯性计数精度：auto/mixed = 单精度计数 + η 裕量证书 + 双精度回退；double = 全双精度
     ordering: str = "auto"
@@ -223,9 +223,13 @@ class Solver:
                     self.rep.diagnostics.append(f"[内存] {purpose} 分解超出内存上限（{e}），改用外存（OOC）")
                     slot.destroy()
                     slot = self._slots[key] = self._new_slot(key, prec, ooc=True)
-                    with (self._thr_fac if keep else self._thr_cnt)():
-                        F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=True,
-                                      slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr, precision=prec)
+                    try:
+                        with (self._thr_fac if keep else self._thr_cnt)():
+                            F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=True,
+                                          slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr, precision=prec)
+                    except FactorMemoryError as e2:
+                        raise MemoryError(f"改用外存后 {purpose} 分解仍超出内存上限 {self.o.mem_limit_gb} GB（{e2}）；"
+                                          f"请增大 --mem-limit-gb，或减小问题规模") from e2
             except NearSingularError as e:
                 F, reason = None, f"分解失败({e})"
             else:
@@ -633,8 +637,7 @@ class Solver:
                 if spec or not np.all(resid[:nev] <= 1e-6 * np.abs(theta[:nev])):
                     return
                 th, te = np.real(theta[:nev]), np.real(theta[nev:])
-                plan = self._plan_mixed(sigma, k, s_used + 1.0 / th[th != 0], s_used + 1.0 / te[te != 0],
-                                        self._expensive(F))
+                plan = self._plan_mixed(sigma, k, s_used + 1.0 / th[th != 0], s_used + 1.0 / te[te != 0])
                 spec["plan"] = plan
                 if plan is not None and plan[0][2] == plan[1][2] == "single":
                     spec["futs"] = [self.pool.submit(x, INF, d, pr) for (x, d, pr) in plan]
@@ -729,15 +732,18 @@ class Solver:
         """首次保留因子分解的实测耗时（含符号分析），用于在“多一次分析/多一轮补解”与“省一半数值分解”之间取舍。"""
         return next((f.get("seconds_factor", 0.0) for f in self.rep.factorizations if not f.get("count_only")), 0.0)
 
-    def _expensive(self, F):
-        """是否值得把少量未求出的特征值并入证书窗口、交给收缩补解，以换取该侧用单精度计数。
-        省下的约是半次数值分解（≈0.4×首次分解耗时），付出的是一轮补解 Krylov——被并入的往往是 r_k 外侧的近并列特征值，
-        补解代价与主 Krylov 相当（鲲鹏复厄密算例实测补解 160–310 次算子作用，主 Krylov 152 次）。
-        只在前者明显更大（> 2×主 Krylov 耗时）时才并入。只影响耗时，不影响正确性。"""
+    def _absorb_budget(self):
+        """把未求出的特征值估计并入证书窗口、交给收缩补解，以换取该侧用单精度计数，是否划算：返回 (副本额度, 近并列额度)。
+        省下的约是半次数值分解（≈0.4×首次分解耗时）。付出的是一轮补解 Krylov：
+          * 已得特征值的精确简并副本：收缩掉已得的那个后它就是剩余谱中最靠近位移的，补解快（约半次主 Krylov）；
+          * r_k 外侧数值不同的近并列特征值：与窗口外紧邻者离位移几乎一样远，补解与主 Krylov 相当
+            （鲲鹏复厄密算例实测补解 160–310 次算子作用，主 Krylov 152 次）。
+        只影响耗时，不影响正确性。"""
         ks = self.rep.krylov_runs[0]["seconds"] if self.rep.krylov_runs else np.inf
-        return 0.4 * self._first_factor_seconds() > 2.0 * ks
+        save = 0.4 * self._first_factor_seconds()
+        return (8 if save > 0.5 * ks else 0), (8 if save > 2.0 * ks else 0)
 
-    def _plan_mixed(self, sigma, k, lam, ritz, expensive=False):
+    def _plan_mixed(self, sigma, k, lam, ritz, budgets=(0, 0)):
         """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
 
         单精度计数 ν̃(x) 是邻近矩阵的精确惯性：ν(x−η) ≤ ν̃(x) ≤ ν(x+η)（η 见 factor.count_eta）。
@@ -746,8 +752,8 @@ class Solver:
         （距两侧各 ≥ 2η，故 ρ − η > r_k）；已得特征值可以被划入窗口，未求出的估计值挡在间隙之前则该侧
         改用双精度内端点 x = σ ± (r_k − τ)，τ = 1e-7·r_k（与第 k 个并列的特征值任取其一）。
         估计不准只会造成计数多出（按“补解”处理）或回退双精度，不影响证书的正确性。
-        expensive（数值分解主导）时，r_k 处少量（≤8）未求出的简并副本不再迫使回退双精度：端点越过它们，
-        计数多出的副本由收缩补解求出——一轮补解只需几秒，双精度计数比单精度贵一倍（复厄密十万阶约多 20 s）。
+        budgets = (副本额度, 近并列额度)（见 _absorb_budget）：额度内的未求出估计值不再迫使回退双精度，端点越过它们，
+        计数多出的部分由收缩补解求出。与某个已得特征值相对差 ≤1e-8 的估计值算“副本”（精确简并），其余算“近并列”。
         """
         lam = np.asarray(lam, dtype=float)
         if lam.size < k:
@@ -760,25 +766,34 @@ class Solver:
         ritz = np.asarray(ritz, dtype=float)
         ritz = ritz[np.isfinite(ritz)]
 
+        ctol = 1e-8 * max(abs(sigma) + rk, 1e-3 * self.nA)
+
         def plan(side):
             d = np.abs(lam - sigma)[np.sign(lam - sigma) == side]
             rd = np.abs(ritz - sigma)[np.sign(ritz - sigma) == side]
+            copy = (np.min(np.abs(rd[:, None] - d[None, :]), axis=1) <= ctol) if d.size and rd.size else np.zeros(rd.size, bool)
+            budget = list(budgets)                  # [副本额度, 近并列额度]
+
+            def take(is_copy):
+                i = 0 if is_copy else 1
+                if budget[i] <= 0:
+                    return False
+                budget[i] -= 1
+                return True
+
             ties = (rd > rk - 2 * eta) & (rd <= rk + 2 * eta)
-            budget = 8 if expensive else 0          # 可并入窗口、交给补解的未求出估计值个数
-            if ties.sum() > budget:   # 双精度内端点，近奇异时只向 σ 一侧扰动（见 _solve_nearest）
-                return sigma + side * (rk - tau), -side, "double"
-            budget -= int(ties.sum())
+            for c in copy[ties]:
+                if not take(bool(c)):   # 双精度内端点，近奇异时只向 σ 一侧扰动（见 _solve_nearest）
+                    return sigma + side * (rk - tau), -side, "double"
             d = np.concatenate([d, rd[ties]])       # 当作“将被补解求出”的特征值划入窗口
-            rd = rd[~ties]
-            pts = sorted([(v, True) for v in d[d > rk]] + [(v, False) for v in rd[rd > rk]])
+            rd, copy = rd[~ties], copy[~ties]
+            pts = sorted([(v, True, False) for v in d[d > rk]] + [(v, False, bool(c)) for v, c in zip(rd, copy) if v > rk])
             a = rk
-            for v, found in pts:
+            for v, found, is_copy in pts:
                 if v - a >= 4 * eta:
                     break
-                if not found:
-                    if budget <= 0:
-                        return sigma + side * (rk - tau), -side, "double"
-                    budget -= 1
+                if not found and not take(is_copy):
+                    return sigma + side * (rk - tau), -side, "double"
                 a = v
             else:
                 v = np.inf
@@ -799,7 +814,7 @@ class Solver:
         spec：Krylov 迭代中途按 Ritz 值提前提交的计数；最终结果下端点仍满足规划条件时直接采用。
         """
         o = self.o
-        plan = self._plan_mixed(sigma, k, lam, self._ritz, self._expensive(F))
+        plan = self._plan_mixed(sigma, k, lam, self._ritz, self._absorb_budget())
         if plan is None:
             return False, lam, X, F
         lo, hi = plan

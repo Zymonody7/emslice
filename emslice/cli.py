@@ -212,7 +212,11 @@ def main(argv=None):
         raise SystemExit("需要矩阵文件或 --config")
     if a.cmd == "solve" and not a.matrix:
         a.matrix = _load_config(a.config).get("matrix")
-    return a.func(a)
+    try:
+        return a.func(a)
+    except MemoryError as e:   # 内存上限内无法完成（含外存重试）：给出明确提示而非堆栈
+        print(f"[emslice] 内存不足：{e}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
