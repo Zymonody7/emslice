@@ -47,6 +47,8 @@ emslice solve data/small/cube20.npz --sigma 1e-3 --which above -k 20
 emslice solve data/small/cube20.npz --interval 100 300
 # 用配置文件
 emslice solve --config configs/default.yaml
+# 惯性计数默认用单精度 LDLᵀ（η 裕量证书，必要时自动双精度）；--precision double 全程双精度，--no-verify 跳过证书
+emslice solve data/small/cube20.npz --sigma 500 -k 20 --precision double
 
 # 有限元广义问题 Kx=λMx（需 scikit-fem；fem-dr/fem-ferrite 另需 gmsh）：介质谐振器滤波腔，约 10 万阶
 emslice gen fem-dr --out data/fem/dr.npz            # 写出 dr.npz (K)、dr_B.npz (M)、dr.json（网格信息）
@@ -58,7 +60,7 @@ emslice check data/small/cube20.npz result
 
 输入：`.npz`（scipy.sparse.save_npz，或含 data/indices/indptr、row/col/data 的 numpy npz）、`.npy`、`.mtx`、`.mat`；
 仅存上/下三角时自动恢复（`--triangle` 可强制）。
-输出：`eigenvalues.npy`、`eigenvectors.npy`（或 `--format npz/mat`）与 `report.json`（残差、证书、分解统计、诊断）。
+输出：`eigenvalues.npy`、`eigenvectors.npy`（或 `--format npz/mat`）与 `report.json`（残差、证书、特征向量子空间夹角上界、分解统计、诊断）。
 
 ## 测试矩阵与真值
 
@@ -94,7 +96,7 @@ scripts/   reproduce.sh 一键复现
 
 ## 当前进展（2026-10-11）
 
-- [x] 求解器全部核心能力；20 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
+- [x] 求解器全部核心能力；21 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
 - [x] 10 万阶基准：10 个 Yee/公开矩阵算例 + 4 个有限元广义问题算例（含复厄密铁氧体），全部证书通过
 - [x] 与 SLEPc / SciPy 对比（`results/full/report.md`）
 - [x] 方案说明文档初稿（`docs/方案说明文档.md`）、演示视频脚本、Dockerfile、一键复现脚本

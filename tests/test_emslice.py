@@ -184,6 +184,29 @@ def test_generalized_problem():
 
 
 @needs_inertia
+def test_generalized_angle_bound():
+    """广义问题的子空间夹角上界（‖R‖_{B⁻¹} 由共轭梯度求得）在 B-内积下不小于真实夹角。"""
+    A, _ = preset("puck", 6)
+    n = A.shape[0]
+    R = sp.random(n, n, density=3.0 / n, random_state=1)
+    Bm = sp.csr_matrix(sp.identity(n) * 2 + 0.3 * (R + R.T) / abs(R + R.T).sum(1).max())
+    import scipy.linalg as sla
+
+    w, V = sla.eigh(A.toarray(), Bm.toarray())
+    L = np.linalg.cholesky(Bm.toarray())
+    lam, X, rep = Solver(A, Bm, Options(k=10, sigma=float(np.median(w)))).solve()
+    bounds = rep.residuals["per_eig_subspace_sin_bound"]
+    assert rep.certified and any(b is not None for b in bounds)
+    for i, b in enumerate(bounds):
+        if b is None:
+            continue
+        E = np.linalg.qr(L.T @ V[:, np.abs(w - lam[i]) < 1e-7 * abs(w).max()])[0]
+        y = L.T @ X[:, i]
+        y /= np.linalg.norm(y)
+        assert np.linalg.norm(y - E @ (E.T @ y)) <= b + 1e-14
+
+
+@needs_inertia
 def test_parallel_pool_matches_serial():
     A, ev = _cube(6)
     phys = ev[ev > 1e-9]

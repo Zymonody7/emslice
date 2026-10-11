@@ -1,0 +1,3 @@
+RESIDUAL 3 52 {'n': 537, 'cplx': False, 'kind': 'cluster', 'gen': False} {'k': 10, 'sigma': -1.3214709758330279, 'which': 'nearest', 'precision': 'double', 'workers': 2, 'seed': 19} got 10 back 6.9e-08 ['[局部尺度] 预偏移 2.16e-09 使远处特征对精度受限（σ 贴近谐振点），改用 σ+4.01e-04 重分解']
+UNCERTIFIED 8 39 {'n': 371, 'cplx': False, 'kind': 'cluster', 'gen': False} {'k': 20, 'sigma': 1.6699999993210266, 'which': 'below', 'precision': 'double', 'workers': 1, 'seed': 77} got 20 back 3.5e-13 ['[近奇异位移] inertia 位移 1.66999999932103 贴近特征值（探针增长因子 1.2e+15），自适应扰动 +4.52e-10 → 1.66999999977303', '[目标重定位] 惯性括区：[-0.996381, 1.67] 内含 74 个特征值（18 次惯性计数，17 批并发），位移移至区间中部求解']
+{'total': 600, 'ok': 598, 'honest_uncertified': 1, 'residual_only': 1, 'wrong': 0, 'angle_violation': 0, 'error': 0}  459s
