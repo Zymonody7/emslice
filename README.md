@@ -98,7 +98,8 @@ scripts/   reproduce.sh 一键复现
 - [x] 方案说明文档初稿（`docs/方案说明文档.md`）、演示视频脚本、Dockerfile、一键复现脚本
 - [x] 方案说明文档 PDF
 - [x] 有限元（Nédélec）广义问题场景（`results/fem/report.md`）
-- [ ] Linux 多核实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
+- [x] Linux 验证：Docker（Linux aarch64，conda-forge 全量环境）18/18 测试通过；华为鲲鹏（HiSilicon，640 核）+ openEuler 22.03 上 17 项通过（1 项因未装 gmsh 跳过）
+- [ ] 多核扩展性实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
 
 ## 参与贡献
 
