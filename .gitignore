@@ -14,3 +14,6 @@ results/*.log
 # 命题方任务书仅本地参考，以官网发布为准
 docs/赛题任务书.pdf
 results/*/done
+
+# 生成的演示视频与中间文件
+video/
