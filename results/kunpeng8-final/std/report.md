@@ -23,9 +23,11 @@
 | cavity_upper_storage | mid_band+triangle_input | 100988 | emslice（含证书） | 8.8 | 1033 | 30 | ✅ | 5.79e-12 | 6.43e-16 | 0 |
 | cavity_upper_storage | mid_band+triangle_input | 100988 | emslice（无证书快速模式） | 6.2 | 985 | 30 | 无 | 5.79e-12 | 3.09e-16 | 0 |
 | cavity_upper_storage | mid_band+triangle_input | 100988 | SLEPc Krylov-Schur + MUMPS | 6.8 | 863 | 30 | 无 | 3.14e-05 | 6.49e-11 | 0 |
+| cavity_upper_storage | mid_band+triangle_input | 100988 | SciPy eigsh + SuperLU | 818.3 | 5209 | 30 | 无 | 1.01e-12 | 2.11e-15 | 0 |
 | dielectric_puck | dielectric | 101376 | emslice（含证书） | 9.9 | 1097 | 20 | ✅ | 2.78e-13 | — | — |
 | dielectric_puck | dielectric | 101376 | emslice（无证书快速模式） | 9.6 | 1133 | 20 | ✅ | 5.59e-13 | 1.80e-15 | — |
 | dielectric_puck | dielectric | 101376 | SLEPc Krylov-Schur + MUMPS | 15.9 | 977 | 20 | 无 | 3.80e-13 | 1.10e-12 | — |
+| dielectric_puck | dielectric | 101376 | SciPy eigsh + SuperLU | 641.3 | 3896 | 20 | 无 | 3.37e-15 | 6.59e-15 | — |
 | bloch_complex_hermitian | complex_herm | 107811 | emslice（含证书） | 131.2 | 6882 | 20 | ✅ | 1.08e-11 | 1.88e-17 | 0 |
 | bloch_complex_hermitian | complex_herm | 107811 | emslice（无证书快速模式） | 62.2 | 5657 | 20 | 无 | 1.61e-11 | 2.28e-17 | 0 |
 | bloch_complex_hermitian | complex_herm | 107811 | SLEPc Krylov-Schur + MUMPS | 91.8 | 5779 | 20 | 无 | 4.92e-03 | 4.30e-04 | 0 |
@@ -35,6 +37,8 @@
 | suitesparse_2cubes_low | public_em+wide_dynamic_range | 101492 | emslice（含证书） | 25.4 | 1119 | 30 | ✅ | 3.98e-17 | — | — |
 | suitesparse_2cubes_low | public_em+wide_dynamic_range | 101492 | emslice（无证书快速模式） | 26.1 | 1100 | 30 | ✅ | 3.32e-17 | 1.63e-15 | — |
 | suitesparse_2cubes_low | public_em+wide_dynamic_range | 101492 | SLEPc Krylov-Schur + MUMPS | 59.3 | 1038 | 30 | 无 | 4.22e-16 | 2.61e-15 | — |
+| suitesparse_2cubes_low | public_em+wide_dynamic_range | 101492 | SciPy eigsh + SuperLU | 1231.7 | 4974 | 30 | 无 | 4.45e-20 | 3.42e-15 | — |
 | suitesparse_2cubes_band | public_em+mid_band | 101492 | emslice（含证书） | 9.9 | 926 | 20 | ✅ | 3.50e-14 | — | — |
 | suitesparse_2cubes_band | public_em+mid_band | 101492 | emslice（无证书快速模式） | 6.8 | 930 | 20 | 无 | 3.51e-14 | 1.66e-15 | — |
 | suitesparse_2cubes_band | public_em+mid_band | 101492 | SLEPc Krylov-Schur + MUMPS | 10.3 | 779 | 20 | 无 | 1.96e-15 | 2.99e-15 | — |
+| suitesparse_2cubes_band | public_em+mid_band | 101492 | SciPy eigsh + SuperLU | 1144.2 | 4994 | 20 | 无 | 2.92e-22 | 2.99e-15 | — |
