@@ -28,7 +28,8 @@ import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
 
-from .factor import NearSingularError, PetscSlot, ShiftedPattern, available_backends, count_eta, factorize
+from .factor import (FactorMemoryError, NearSingularError, PetscSlot, ShiftedPattern, available_backends, count_eta,
+                     factorize)
 from .krylov import krylov_schur
 
 log = logging.getLogger("emslice")
@@ -51,7 +52,7 @@ class Options:
     precision: str = "auto"         # 惯性计数精度：auto/mixed = 单精度计数 + η 裕量证书 + 双精度回退；double = 全双精度
     ordering: str = "auto"
     mem_limit_gb: float | None = None
-    ooc: bool | str = "auto"
+    ooc: bool | str = "auto"        # auto：内存超限（--mem-limit-gb）或分配失败时自动改用外存；True/False 强制
     threads: int | None = None
     seed: int = 0
     refine_steps: int = 6
@@ -208,13 +209,23 @@ class Solver:
                 share = prec == "double" and not self._keep_busy and self._thr_cnt.n == self._thr_fac.n
                 key = "keep" if (keep or share) else prec
                 if key not in self._slots:
-                    self._slots[key] = PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=key != "keep",
-                                                 precision=prec, ooc=bool(self.o.ooc) if self.o.ooc != "auto" else False)
+                    self._slots[key] = self._new_slot(key, prec, ooc=self.o.ooc is True)
                 slot = self._slots[key]
             try:
-                with (self._thr_fac if keep else self._thr_cnt)():
-                    F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=self.o.ooc,
-                                  slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr, precision=prec)
+                try:
+                    with (self._thr_fac if keep else self._thr_cnt)():
+                        F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=self.o.ooc,
+                                      slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr, precision=prec)
+                except FactorMemoryError as e:
+                    if slot is None or slot.ooc or self.o.ooc is False:
+                        raise MemoryError(f"{e}；可设置更大的 --mem-limit-gb、开启 --ooc on 或减少并发") from e
+                    # 内存超限：该槽改用外存（因子写盘，内存约减半，求解变慢）后重试同一位移
+                    self.rep.diagnostics.append(f"[内存] {purpose} 分解超出内存上限（{e}），改用外存（OOC）")
+                    slot.destroy()
+                    slot = self._slots[key] = self._new_slot(key, prec, ooc=True)
+                    with (self._thr_fac if keep else self._thr_cnt)():
+                        F = factorize(self.pattern, x, backend=self.backend, ordering=self.o.ordering, ooc=True,
+                                      slot=slot, nS=self.nA + abs(x) * self.nB, blr=self.o.blr, precision=prec)
             except NearSingularError as e:
                 F, reason = None, f"分解失败({e})"
             else:
@@ -245,6 +256,15 @@ class Solver:
             if abs(delta) > max_delta:
                 break
         raise NearSingularError(f"在 {shift} 附近多次扰动后仍奇异: {reasons}")
+
+    def _new_slot(self, key, prec, ooc=False):
+        """新建常驻槽；--mem-limit-gb 时把每进程工作内存上限交给 MUMPS（ICNTL(23)）。"""
+        lim = None
+        if self.o.mem_limit_gb:
+            procs = 1 + (self.max_conc if self._parallel else 0)
+            lim = max(64, int(0.8 * self.o.mem_limit_gb * 1024 / procs))
+        return PetscSlot(self.pattern, ordering=self.o.ordering, blr=self.o.blr, count_only=key != "keep", precision=prec,
+                         ooc=ooc, mem_limit_mb=lim)
 
     def _release_keep(self):
         self._keep_busy = False
@@ -672,7 +692,9 @@ class Solver:
                 break
             if not self._parallel:
                 F.free()         # 串行计数复用位移分解的槽，省一次符号分析；补解时再数值重分解
-            (n_lo, x_lo), (n_hi, x_hi) = self.counts([(sigma - rho, INF, 0), (sigma + rho, INF, 0)])
+            # 内端点近奇异时只向 σ 一侧扰动：端点紧挨着 r_k 处的并列特征值（可能是上万重的梯度零空间），
+            # 向外扰动会把整个簇算进窗口
+            (n_lo, x_lo), (n_hi, x_hi) = self.counts([(sigma - rho, INF, 1), (sigma + rho, INF, -1)])
             inside = int(n_hi - n_lo)
             found_in = int(np.sum((lam > x_lo) & (lam < x_hi)))
             self.rep.certificate = dict(round=rnd, kind="inner-window", window=[x_lo, x_hi], r_k=rk,
@@ -686,6 +708,11 @@ class Solver:
                 self.rep.diagnostics.append(f"惯性计数 {inside} < 窗口内已得 {found_in}：窗口边界贴近特征值，结果仍按残差有效")
                 break
             missing = inside - found_in
+            if missing > 4 * k + 64:
+                # 兜底：缺口远大于所求个数，说明窗口边界压在大簇上（扰动已限定向内，正常不会出现）；不盲目补解
+                self.rep.certified = False
+                self.rep.diagnostics.append(f"[证书] 窗口计数 {inside} 远大于已得 {found_in}（窗口边界贴近大簇），未出证书")
+                break
             block = min(max(block, missing + 1), 16)
             self.rep.diagnostics.append(f"[完备性] 第 {rnd} 轮：距 σ 小于 r_k 的惯性计数 {inside} > 已得 {found_in}，"
                                         f"漏解 {missing} 个（重特征值/密集谱）→ 收缩已得向量，块尺寸 {block} 继续")
@@ -738,8 +765,8 @@ class Solver:
             rd = np.abs(ritz - sigma)[np.sign(ritz - sigma) == side]
             ties = (rd > rk - 2 * eta) & (rd <= rk + 2 * eta)
             budget = 8 if expensive else 0          # 可并入窗口、交给补解的未求出估计值个数
-            if ties.sum() > budget:
-                return sigma + side * (rk - tau), 0, "double"
+            if ties.sum() > budget:   # 双精度内端点，近奇异时只向 σ 一侧扰动（见 _solve_nearest）
+                return sigma + side * (rk - tau), -side, "double"
             budget -= int(ties.sum())
             d = np.concatenate([d, rd[ties]])       # 当作“将被补解求出”的特征值划入窗口
             rd = rd[~ties]
@@ -750,7 +777,7 @@ class Solver:
                     break
                 if not found:
                     if budget <= 0:
-                        return sigma + side * (rk - tau), 0, "double"
+                        return sigma + side * (rk - tau), -side, "double"
                     budget -= 1
                 a = v
             else:
@@ -1018,6 +1045,12 @@ class Solver:
         ea/eb：边界计数的单精度不确定半径。边界外 η 内求得的特征值可能被该边界计数算入本片，计作“边界含糊”，
         不再为它们补解（总数由区间两端的计数核对）。"""
         cnt = cb - ca
+        if cnt > max(8 * self.o.slice_max, 512):
+            # 无法再分的近同值簇（如区间含上万重的梯度零空间）：整体求解需要 cnt 维 Krylov 基，内存不可承受；
+            # 如实报告其重数（惯性计数已精确给出），不求向量
+            self.rep.diagnostics.append(f"[簇] 切片 [{sa:.10g},{sb:.10g}) 含 {cnt} 个近同值特征值（如梯度零空间），"
+                                        f"超出可整体求解的规模，未求特征向量；其重数由惯性计数给出")
+            return np.empty(0), np.empty((self.n, 0), self.dtype)
         off = min(self.PRE_OFFSET * self.nA, 1e-4 * (sb - sa) * 0.6180339887)
         F, s_used = self._factor(0.5 * (sa + sb) + off, "slice", keep=True)
         self.rep.shifts.append(s_used)

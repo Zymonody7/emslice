@@ -44,6 +44,8 @@ def cmd_solve(a):
         merged["interval"] = tuple(a.interval)
     if a.no_verify:
         merged["verify"] = False
+    if isinstance(merged.get("ooc"), str):     # --ooc auto|on|off（配置文件里也可写 true/false）
+        merged["ooc"] = {"on": True, "off": False, "true": True, "false": False}.get(merged["ooc"].lower(), "auto")
     unknown = set(cfg) - set(SOLVE_KEYS) - {"matrix", "B", "out", "format", "triangle", "key", "symmetrize", "secure", "save_vectors"}
     if unknown:
         raise SystemExit(f"配置文件含未知键: {sorted(unknown)}")
@@ -167,7 +169,9 @@ def build_parser():
     s.add_argument("--backend", choices=["auto", "petsc", "scipy"])
     s.add_argument("--precision", choices=["double", "mixed", "auto"])
     s.add_argument("--ordering", choices=["auto", "metis", "amd", "scotch", "pord"])
-    s.add_argument("--mem-limit-gb", type=float, dest="mem_limit_gb")
+    s.add_argument("--mem-limit-gb", type=float, dest="mem_limit_gb",
+                   help="内存上限（GB）：交给 MUMPS 作每进程工作内存上限，超出时自动改用外存（OOC），并按此限制并发")
+    s.add_argument("--ooc", choices=["auto", "on", "off"], help="外存分解：auto（默认，内存超限时自动启用）| on | off")
     s.add_argument("--threads", type=int)
     s.add_argument("--workers", type=int, help="惯性计数并发进程数（默认自动）")
     s.add_argument("--blr", type=float, help="启用 MUMPS 块低秩压缩，参数为截断精度（如 1e-10）")

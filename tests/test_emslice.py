@@ -207,6 +207,18 @@ def test_generalized_angle_bound():
 
 
 @needs_inertia
+def test_memory_limit_switches_to_out_of_core(tmp_path, monkeypatch):
+    """内存上限过小时 MUMPS 报 INFOG(1)=-19（PETSc 不抛异常，惯性无效）：须检出并自动改用外存重试，结果不变。"""
+    monkeypatch.setenv("MUMPS_OOC_TMPDIR", str(tmp_path))
+    A, _ = preset("cube", 20)          # n≈2.4 万，在核分解约 80 MB
+    r0 = Solver(A, None, Options(k=8, sigma=500.0)).solve()
+    r1 = Solver(A, None, Options(k=8, sigma=500.0, mem_limit_gb=0.04)).solve()
+    assert r0[2].certified and r1[2].certified
+    assert np.allclose(np.sort(r0[0]), np.sort(r1[0]), rtol=1e-10, atol=1e-10)
+    assert any("外存" in d for d in r1[2].diagnostics) and any(f.get("ooc") for f in r1[2].factorizations)
+
+
+@needs_inertia
 def test_parallel_pool_matches_serial():
     A, ev = _cube(6)
     phys = ev[ev > 1e-9]

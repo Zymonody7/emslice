@@ -35,6 +35,14 @@ class NearSingularError(RuntimeError):
     pass
 
 
+class FactorMemoryError(RuntimeError):
+    """分解所需内存超过上限（ICNTL(23)）或内存分配失败：可改用外存（OOC）重试。"""
+
+
+# MUMPS INFOG(1) 中与内存有关的错误：-13 分配失败，-19 超过 ICNTL(23)，其余为内部工作区不足
+_MUMPS_MEMORY_ERRORS = (-11, -12, -13, -14, -15, -17, -19, -20)
+
+
 U_SINGLE = float(np.finfo(np.float32).eps)
 SINGLE_ETA = 100.0
 
@@ -190,7 +198,7 @@ class PetscSlot:
     ORDERINGS = {"mumps-auto": 7, "amd": 0, "amf": 2, "scotch": 3, "pord": 4, "metis": 5, "qamd": 6}
 
     def __init__(self, pattern: ShiftedPattern, ordering="auto", ooc=False, null_tol=None, mem_relax=40, blr=None,
-                 count_only=False, precision="double"):
+                 count_only=False, precision="double", mem_limit_mb=None):
         PETSc = self.PETSc = _petsc()
         it = PETSc.IntType
         self.indptr = pattern.indptr.astype(it)
@@ -222,6 +230,8 @@ class PetscSlot:
             F.setMumpsCntl(3, null_tol)
         if ooc:
             F.setMumpsIcntl(22, 1)
+        if mem_limit_mb:               # 每进程工作内存上限（MB）；超出时 MUMPS 报 -19，由求解器改用外存重试
+            F.setMumpsIcntl(23, int(mem_limit_mb))
         if blr:                        # 块低秩压缩（BLR），blr = 截断精度 ε
             F.setMumpsIcntl(35, 2)
             F.setMumpsCntl(7, float(blr))
@@ -236,13 +246,26 @@ class PetscSlot:
 
     def factor(self, data):
         t0 = time.perf_counter()
-        self.mat.setValuesCSR(self.indptr, self.indices, data)
-        self.mat.assemble()
-        self.ksp.setOperators(self.mat)
-        try:
-            self.ksp.setUp()
-        except self.PETSc.Error as e:
-            raise NearSingularError(f"MUMPS 分解失败: {e}") from e
+        for _ in range(4):
+            self.mat.setValuesCSR(self.indptr, self.indices, data)
+            self.mat.assemble()
+            self.ksp.setOperators(self.mat)
+            try:
+                self.ksp.setUp()
+            except self.PETSc.Error as e:
+                raise NearSingularError(f"MUMPS 分解失败: {e}") from e
+            # PETSc 在 MUMPS 失败时只记下错误标志、不抛异常，此时读出的惯性无效（实测为 (0, 0, n)）：必须检查 INFOG(1)
+            info = int(self.F.getMumpsInfog(1))
+            if info >= 0:
+                break
+            if info in (-8, -9):   # 分析阶段估计的工作区不足：放大内存松弛系数 ICNTL(14) 后重做数值分解
+                self.F.setMumpsIcntl(14, max(2 * int(self.F.getMumpsIcntl(14)), 80))
+                continue
+            if info in _MUMPS_MEMORY_ERRORS:
+                raise FactorMemoryError(f"MUMPS 内存不足（INFOG(1)={info}, INFOG(2)={self.F.getMumpsInfog(2)}）")
+            raise NearSingularError(f"MUMPS 分解失败（INFOG(1)={info}）")
+        else:
+            raise FactorMemoryError("MUMPS 工作区多次放大后仍不足")
         dt = time.perf_counter() - t0
         reused = self.analyzed
         self.analyzed = True

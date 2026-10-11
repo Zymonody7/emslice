@@ -9,7 +9,7 @@ tol: 1.0e-10                    # 后向误差门槛
 verify: true                    # 惯性完备性证书（保证目标频段不漏解）
 block: null                     # Krylov 块尺寸，null = 自动
 backend: auto                   # auto | petsc | scipy
-precision: double               # double | mixed
+precision: auto                 # auto（单精度计数 + η 裕量证书，必要时自动双精度）| double
 threads: null                   # null = 使用全部核
 out: result
 format: npy                     # npy | npz | mat
