@@ -1,7 +1,7 @@
 """合并多个 results 目录并生成文档用的对比表（Markdown）。
 
-python bench/summary.py --out results/kunpeng8-final results/kunpeng8 results/kunpeng8-scipy \
-    --override results/kunpeng8-cplx3 --baseline results/kunpeng8-v01
+python bench/summary.py --out results/kunpeng8-final results/kunpeng8-scipy results/p8/main \
+    --override results/p8/fem3 --pair results/p8/pair results/p8/pair-fem3
 
 * 依次读入各目录的 results.jsonl，同一 (算例, 求解器) 以后读入的为准；--override 目录最后读入；
 * --baseline 目录里的 emslice 结果作为“v0.1”列；
@@ -70,7 +70,8 @@ def main():
     ap.add_argument("dirs", nargs="+")
     ap.add_argument("--override", nargs="*", default=[])
     ap.add_argument("--baseline", help="v0.1 结果目录（emslice 标签）；与 --pair 二选一")
-    ap.add_argument("--pair", help="同一时段交替运行的 v0.1/v0.2 结果目录（标签 v01 / v02），给出“相对 v0.1 提速”")
+    ap.add_argument("--pair", nargs="+", help="同一时段交替运行的 v0.1/v0.2 结果目录（标签 v01 / v02），给出“相对 v0.1 提速”；"
+                    "多个目录时后者覆盖前者")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     rows = {}
@@ -78,7 +79,9 @@ def main():
         rows.update(load(d))
     base = load(a.baseline) if a.baseline else {}
     if a.pair:   # 提速比只在同一时段的交替运行内计算，避免机器负载变化带来的偏差
-        pr = load(a.pair)
+        pr = {}
+        for d in a.pair:
+            pr.update(load(d))
         base = {(n, "speedup"): pr[(n, "v01")]["seconds"] / pr[(n, "v02")]["seconds"]
                 for (n, sv) in pr if sv == "v02" and (n, "v01") in pr and not pr[(n, "v01")].get("error")}
     os.makedirs(a.out, exist_ok=True)

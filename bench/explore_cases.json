@@ -1,0 +1,92 @@
+[
+ {
+  "name": "cube_k50",
+  "scenario": "large_k",
+  "matrix": "data/bench/cube33.npz",
+  "B": null,
+  "ref": null,
+  "k": 50,
+  "sigma": 3000.0,
+  "which": "nearest"
+ },
+ {
+  "name": "cube_k100",
+  "scenario": "large_k",
+  "matrix": "data/bench/cube33.npz",
+  "B": null,
+  "ref": null,
+  "k": 100,
+  "sigma": 3000.0,
+  "which": "nearest"
+ },
+ {
+  "name": "cube_k200",
+  "scenario": "large_k",
+  "matrix": "data/bench/cube33.npz",
+  "B": null,
+  "ref": null,
+  "k": 200,
+  "sigma": 3000.0,
+  "which": "nearest"
+ },
+ {
+  "name": "fem_dr_k60",
+  "scenario": "large_k",
+  "matrix": "data/fem/fem_dr.npz",
+  "B": "data/fem/fem_dr_B.npz",
+  "ref": null,
+  "k": 60,
+  "sigma": 0.010981415890099112,
+  "which": "nearest"
+ },
+ {
+  "name": "fem_dr_above50",
+  "scenario": "large_k",
+  "matrix": "data/fem/fem_dr.npz",
+  "B": "data/fem/fem_dr_B.npz",
+  "ref": null,
+  "k": 50,
+  "sigma": 4.392566356039645e-08,
+  "which": "above"
+ },
+ {
+  "name": "cube_interval",
+  "scenario": "interval",
+  "matrix": "data/bench/cube33.npz",
+  "B": null,
+  "ref": null,
+  "k": 1,
+  "sigma": 0.0,
+  "which": "interval"
+ },
+ {
+  "name": "fem_dr_interval",
+  "scenario": "interval",
+  "matrix": "data/fem/fem_dr.npz",
+  "B": "data/fem/fem_dr_B.npz",
+  "ref": null,
+  "k": 1,
+  "sigma": 0.0,
+  "which": "interval"
+ },
+ {
+  "name": "bloch_mem",
+  "scenario": "memory",
+  "matrix": "data/bench/bloch_homog33.npz",
+  "B": null,
+  "ref": null,
+  "k": 20,
+  "sigma": 107.4163928209149,
+  "which": "nearest"
+ },
+ {
+  "name": "cube_mem",
+  "scenario": "memory",
+  "matrix": "data/bench/cube33.npz",
+  "B": null,
+  "ref": null,
+  "k": 20,
+  "sigma": 3306.3592973618242,
+  "which": "nearest"
+ }
+]

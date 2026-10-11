@@ -94,20 +94,24 @@ docs/      赛题任务书、方案说明文档、演示视频脚本
 scripts/   reproduce.sh 一键复现
 ```
 
-## 当前进展（2026-10-11）
+## 当前进展（2026-10-12）
 
-- [x] 求解器全部核心能力；21 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
+- [x] 求解器全部核心能力；26 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
 - [x] 10 万阶基准：10 个 Yee/公开矩阵算例 + 4 个有限元广义问题算例（含复厄密铁氧体），全部证书通过
 - [x] 与 SLEPc / SciPy 对比（`results/full/report.md`）
 - [x] 方案说明文档初稿（`docs/方案说明文档.md`）、演示视频脚本、Dockerfile、一键复现脚本
 - [x] 方案说明文档 PDF
 - [x] 有限元（Nédélec）广义问题场景（`results/fem/report.md`）
-- [x] Linux 验证：Docker（Linux aarch64，conda-forge 全量环境）18/18 测试通过；华为鲲鹏（HiSilicon，640 核）+ openEuler 22.03 上 19 项通过（1 项因未装 gmsh 跳过）
+- [x] Linux 验证：Docker（Linux aarch64，conda-forge 全量环境）18/18 测试通过；华为鲲鹏（HiSilicon，320 物理核 / 640 硬件线程）+ openEuler 22.03 上 25 项通过（1 项因未装 gmsh 跳过）
 - [x] 多核扩展性（鲲鹏单 NUMA 节点 1–32 线程）：复厄密算例加速 15.6 倍，24 次运行全部证书通过（`results/scaling-kunpeng/`）
 - [x] 演示录屏脚本 `scripts/demo.sh`、作品介绍 `docs/作品介绍.pdf`
 - [x] 演示视频（`video/emslice演示视频.mp4`，脚本 `scripts/make_video.py`）
 - [x] v0.2 算法：混合精度惯性证书、子空间夹角上界、推测式证书计数、SCOTCH 排序与符号分析复用、精化与正交化稳健性；
-      鲲鹏 8 核正式基准（`results/kunpeng8/`）与随机压力测试（`bench/fuzz.py`）
+      鲲鹏 8 个物理核正式基准（`results/kunpeng8-final/`，与 SLEPc、v0.1 同一时段交替运行；含证书在 SLEPc 结果正确的算例上为其 0.13–0.96 倍耗时）
+      与随机压力测试（`bench/fuzz.py`，600 例 0 错误；目录说明见 `results/README.md`）
+- [x] 任务书故障场景逐项实测（`bench/scenarios.py`）：低频击穿、重特征值、近奇异、大 k、区间、内存受限（`--mem-limit-gb` 自动外存）
+- [x] 稳健性：检出 MUMPS 静默失败；k 跨进梯度零空间时证书端点只向内扰动、窗口跨进超大簇时核对后补取簇内向量；区间内超大近同值簇只报告重数；
+      阈值以 ‖A‖/‖B‖ 为特征值单位（广义问题与单位制无关）
 
 ## 参与贡献
 

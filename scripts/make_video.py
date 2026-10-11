@@ -43,10 +43,11 @@ MONO = lambda s: _font(MENLO, s, 0)  # noqa: E731
 
 # ------------------------------------------------------------------ 分段脚本
 # 旁白条目：字符串，或 (字幕文本, 朗读文本) 以修正专有名词读音
-# 视频中引用的基准数字（鲲鹏 8 核，results/kunpeng8-final2 等），由 N 统一填入，避免与文档不一致
-N = dict(MID_E="@MID_E@", MID_S="@MID_S@", MID_P="@MID_P@", MID_SB="@MID_SB@", MID_PB="@MID_PB@",
-         RATIO_CERT="@RATIO_CERT@", RATIO_FAST="@RATIO_FAST@", V01="@V01@", NFUZZ="600", FUZZ_OK="@FUZZ_OK@",
-         NTEST="@NTEST@", MEM_DEF="@MEM_DEF@", MEM_OOC="@MEM_OOC@")
+# 视频中引用的基准数字由 N 统一填入，避免与文档不一致
+# 数字取自 results/kunpeng8-final（鲲鹏 8 个物理核）、results/p8/memory、results/fuzz
+N = dict(MID_E="10.3 s", MID_EB="3e-11", MID_S="11.2 s", MID_P="733 s", MID_SB="3e-3", MID_PB="1e-7",
+         RATIO_CERT="0.13 到 0.96 ", RATIO_FAST=" 1.4 到 7.9 ", V01=" 1.1 到 2.2 ", NFUZZ="600", FUZZ_OK="无一错误结果",
+         NTEST="26", MEM_DEF="默认 8.6 GB", MEM_OOC="上限 5 GB 时 3.2 GB")
 
 # 旁白条目：字符串，或 (字幕文本, 朗读文本) 以修正专有名词读音
 SEGMENTS = [
@@ -86,9 +87,10 @@ SEGMENTS = [
          say=["先看一个十万阶的立方谐振腔，它有大量六重、十二重、十八重的简并模式。",
               "我们把目标频率恰好放在一个十八重谐振点上，此时位移矩阵是奇异的。",
               "emslice 自动检测近奇异位移，返回二十个特征值，后向误差约十的负十一次方；窗口内的惯性计数与求得个数一致，证书通过。"]),
-    dict(kind="table", title="同一算例的对比（华为鲲鹏 8 核，n ≈ 10 万）",
+    dict(kind="table", title="同一算例的对比（华为鲲鹏 8 个物理核，n ≈ 10 万）",
+         foot="基准口径：独立进程中从构造求解器到返回结果的墙钟时间（含 PETSc/MPI 初始化），与 SLEPc 同一时段交替运行",
          header=["求解器", "耗时", "最大后向误差", "结果"],
-         rows=[["emslice（含证书）", N["MID_E"], "4e-11", "正确，证书通过"],
+         rows=[["emslice（含证书）", N["MID_E"], N["MID_EB"], "正确，证书通过"],
                ["SLEPc Krylov-Schur + MUMPS", N["MID_S"], N["MID_SB"], "精度崩溃"],
                ["SciPy eigsh + SuperLU", N["MID_P"], N["MID_PB"], "慢两个数量级且精度不达标"]],
          bad=[1, 2],
@@ -110,16 +112,16 @@ SEGMENTS = [
                "python -c \"from emslice.femgen import *; print('解析解 (GHz)：', freq_ghz(analytic_cavity((30, 24, 18), 0.12))[:12].round(4))\""],
          say=["这是一个十万阶的有限元广义问题，同样有一万三千多维的梯度零空间。",
               "emslice 求出前十二个谐振频率，证书通过；与连续问题的解析解逐一对应，前二十阶频率误差不超过千分之一点四。"]),
-    dict(kind="image", path="docs/time_compare.png", caption="十万阶算例耗时对比（华为鲲鹏 8 核；红色斜线 = 结果错误或为空）",
+    dict(kind="image", path="docs/time_compare.png", caption="十万阶算例耗时对比（华为鲲鹏 8 个物理核；红色斜线 = 结果错误或为空）",
          say=["这是全部标准算例的对比。红色斜线表示结果错误或为空。",
-              f"在 SLEPc 结果正确的算例上，emslice 带证书的耗时是它的{N['RATIO_CERT']}倍，不带证书的快速模式快{N['RATIO_FAST']}倍；和上一版相比提速{N['V01']}倍。"]),
+              f"在 SLEPc 结果正确的算例上，emslice 带证书也全部快于它，耗时是它的{N['RATIO_CERT']}倍；不带证书的快速模式快{N['RATIO_FAST']}倍；和上一版相比提速{N['V01']}倍。"]),
     dict(kind="card", title="稳健性：随机压力测试与内存受限", sub="",
          lines=[f"• {N['NFUZZ']} 例随机算例与稠密真值逐一比对：{N['FUZZ_OK']}",
                 "• 四种查询 × 实/复 × 标准/广义 × σ 恰为特征值 / 谱外 / 随机",
                 f"• 内存受限：--mem-limit-gb 超限自动改用外存（复厄密 21.6 万阶：{N['MEM_DEF']} → {N['MEM_OOC']}）",
                 "• 检出 MUMPS 静默失败；大簇贴近窗口边界时只向内扰动"],
          say=[f"我们用六百例随机算例与稠密真值逐一比对，覆盖四种查询方式、实数与复数、标准与广义问题，以及目标频率恰为特征值的情形，没有一例给出错误结果。",
-              "内存受限时，给定内存上限即可：超出时自动改用外存分解，内存约减半。"]),
+              "内存受限时，给定内存上限即可：超出时自动改用外存分解，复厄密算例的峰值内存从八点六 GB 降到三点二 GB。"]),
     dict(kind="term", id="check", title="独立复核与测试",
          cmds=["emslice check data/demo/cav.npz result/demo/cav --B data/demo/cav_B.npz",
                "python -m pytest -q"],
@@ -269,6 +271,8 @@ def render_table(seg):
         for i, v in enumerate(row):
             draw_mixed(d, (cols[i], y), v, 36, c, "Medium" if r in seg.get("bad", []) or r == 0 else "Regular")
         y += 120
+    if seg.get("foot"):
+        draw_mixed(d, (120, y + 20), seg["foot"], 28, MUTED)
     return im
 
 

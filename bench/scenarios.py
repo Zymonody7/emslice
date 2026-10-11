@@ -1,7 +1,10 @@
 """任务书“故障场景与验证”：按场景汇总精度、性能、迭代次数（Markdown 表）。
 
-python bench/scenarios.py results/kunpeng8-final results/explore > results/scenarios.md
+python bench/scenarios.py results/kunpeng8-final results/p8/explore results/p8/explore-v5 results/p8/memory
 每行取一个结果目录中的一次运行（emslice 含证书）；迭代次数 = Krylov 算子作用次数（重启次数）与分解次数（d 双精度 / s 单精度）。
+大 k、区间与内存受限算例定义在 bench/explore_cases.json（矩阵由 bench/cases.py 生成），例如：
+python bench/run.py --cases bench/explore_cases.json --only fem_dr_k60 --solver emslice --out results/mine
+python bench/run.py --cases bench/explore_cases.json --only cube_interval --solver emslice --extra '{"interval":[2990.0,3040.0]}' --out results/mine
 """
 from __future__ import annotations
 
