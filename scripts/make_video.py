@@ -15,7 +15,10 @@ import sys
 import time
 import wave
 
-from PIL import Image, ImageDraw, ImageFont
+try:  # 只有 render 需要 Pillow；capture 可在没有 Pillow 的环境（如服务器）上运行
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover
+    Image = ImageDraw = ImageFont = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "video")
