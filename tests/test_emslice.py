@@ -192,7 +192,8 @@ def test_parallel_pool_matches_serial():
         r2 = Solver(A, None, Options(k=8, sigma=sigma, which=which, workers=2)).solve()
         assert r1[2].certified and r2[2].certified and r2[2].workers == 2
         assert np.allclose(r1[0], r2[0], rtol=1e-10, atol=1e-10)
-        assert any("worker" in f for f in r2[2].factorizations)
+        if which == "above":   # 括区计数成批并发（nearest 的 σ 恰在簇上，只需主进程一次计数）
+            assert any("worker" in f for f in r2[2].factorizations)
 
 
 @needs_inertia
