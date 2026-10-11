@@ -789,6 +789,10 @@ class Solver:
                 break
             missing = inside - found_in
             if missing > 4 * k + 64:
+                rec = self._recover_cluster(F, sigma, k, lam, X)
+                if rec is not None:
+                    lam, X, F = rec
+                    break
                 # 兜底：缺口远大于所求个数，说明窗口边界压在大簇上（扰动已限定向内，正常不会出现）；不盲目补解
                 self.rep.certified = False
                 self.rep.diagnostics.append(f"[证书] 窗口计数 {inside} 远大于已得 {found_in}（窗口边界贴近大簇），未出证书")
@@ -804,6 +808,77 @@ class Solver:
             self.rep.certified = False
         F.free()
         return lam[:k], X[:, :k]
+
+    def _recover_cluster(self, F, sigma, k, lam, X):
+        """窗口计数远多于已得：比已得的第 k 个更近处有一个超大簇（如 σ 附近 60 个的窗口跨进 1.3 万维梯度零空间），
+        Krylov 只看到它的少数方向（块 Krylov 对精确简并簇每块只引入 p 个方向），于是用更远的特征值凑满了 k 个。
+        已得集合按值分组，沿 |λ−σ| 由近到远逐个检查重数 ≥ 4 的组（值 λc，距 σ 为 D）：
+          ν(σ+ρ) − ν(σ−ρ) = 已得中距离 < ρ 的个数 j（ρ 略小于 D）⇒ D 以内无遗漏；
+          簇两侧计数给出其总重数 m_c ≥ k − j             ⇒ 前 k 个 = 这 j 个 + 簇中任取 k − j 个（与第 k 个并列）。
+        簇向量不足时在簇处位移-求逆、收缩已得向量补求。条件不满足返回 None（如实报告未出证书）。"""
+        d = np.abs(lam - sigma)
+        order = np.argsort(d, kind="stable")
+        lam, X, d = lam[order], X[:, order], d[order]
+        zero = 1e-11 * self.lam_unit
+        tolc = 1e-8 * max(float(d.max()), 1e-3 * self.lam_unit)
+        seen = np.zeros(lam.size, bool)
+        tried = 0
+        for i in range(lam.size):
+            if seen[i]:
+                continue
+            grp = np.abs(lam - lam[i]) <= tolc
+            seen |= grp
+            if grp.sum() < 4:
+                continue
+            tried += 1
+            if tried > 3:
+                return None
+            lc, side = float(np.median(lam[grp])), (1 if lam[i] > sigma else -1)
+            gap = max(1e-7 * float(d[grp].min()), zero)
+            rho, rho_out = float(d[grp].min()) - gap, float(d[grp].max()) + gap
+            if rho <= zero:
+                return None
+            j = int(np.sum(d < rho))
+            if j >= k:
+                return None
+            if not self._parallel:
+                F.free()
+            (n_lo, x_lo), (n_hi, x_hi), (n_c, _) = self.counts(
+                [(sigma - rho, INF, 1), (sigma + rho, INF, -1), (sigma + side * rho_out, INF, side)])
+            if int(n_hi - n_lo) != j:
+                return None          # 簇之前还有未求出的特征值：不在本兜底的处理范围
+            m_c = int(n_c - n_hi) if side > 0 else int(n_lo - n_c)
+            if m_c < k - j:
+                continue             # 普通简并能级，大簇在更远处
+            keep = np.concatenate([np.flatnonzero(d < rho), np.flatnonzero(grp)])
+            Xk, need = X[:, keep], k - j - int(grp.sum())
+            if need > 0:
+                # 位移放在簇靠 σ 一侧 δ 处：簇与 σ 之间的特征值都已求得并锁定，簇成员即为未锁定者中离位移最近的；
+                # δ 不取得过小（簇可能精确奇异），保持分解良态、补求的向量精度足够
+                Dc = float(np.median(d[grp]))
+                dl = np.abs(lam[d < rho] - lc)
+                delta = min(1e-3 * Dc, 0.5 * float(dl.min())) if dl.size else 1e-3 * Dc
+                F.free()
+                F, sc = self._factor(lc - side * delta, "shift(簇)", keep=True)
+                self.rep.shifts.append(sc)
+                X2 = self._shift_invert(F, sc, need, "nearest", locked=Xk, block=min(max(8, need + 1), 16))
+                lam2, X2 = self._refine(F, np.hstack([Xk, X2]))
+            else:
+                lam2, X2 = lam[keep], Xk
+            lam2, X2 = self._order(lam2, X2, sigma, "nearest")
+            d2 = np.abs(lam2 - sigma)
+            if lam2.size < k or int(np.sum(d2 < rho)) != j or np.any(d2[:k] > rho_out + gap):
+                return None
+            self.rep.certified = True
+            self.rep.certificate = dict(kind="window+cluster", window=[x_lo, x_hi], inertia_count=j, found_in_window=j,
+                                        cluster=dict(value=lc, distance=float(np.median(d[grp])), multiplicity=m_c,
+                                                     taken=k - j))
+            self._known = (x_lo, x_hi, lam2[d2 < rho])
+            self.rep.diagnostics.append(
+                f"[证书] 窗口内有 {m_c} 重的大簇（λ≈{lc:.6g}，距 σ {np.median(d[grp]):.6g}）：Krylov 只得到其中 {int(grp.sum())} 个方向、"
+                f"以更远的特征值凑足 k 个；计数核对簇以内 {j} 个无遗漏，改取簇内 {k - j} 个（与第 k 个等距的并列）")
+            return lam2, X2, F
+        return None
 
     def _first_factor_seconds(self):
         """首次保留因子分解的实测耗时（含符号分析），用于在“多一次分析/多一轮补解”与“省一半数值分解”之间取舍。"""

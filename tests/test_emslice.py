@@ -244,6 +244,21 @@ def test_narrow_slice_keeps_shift_inside():
 
 
 @needs_inertia
+def test_nearest_window_reaching_huge_cluster():
+    """最近 k 个的窗口跨进超大精确简并簇（如梯度零空间）：块 Krylov 只看到簇的少数方向、用更远的特征值凑满 k 个，
+    证书计数发现缺口远大于 k；应核对簇以内无遗漏、簇重数足够，改取簇内向量补足（与第 k 个等距的并列）。"""
+    rng = np.random.default_rng(4)
+    inner = np.array([0.5, 0.7, 0.9, 1.1, 1.3, 1.6])                      # 距 σ=1 小于 1
+    vals = np.concatenate([inner, np.zeros(300), rng.uniform(2.2, 3.2, 100), rng.uniform(-2.0, -1.5, 50)])
+    A = sp.diags(vals[rng.permutation(vals.size)]).tocsr()
+    lam, X, rep = Solver(A, None, Options(k=30, sigma=1.0)).solve()
+    assert rep.certified and lam.size == 30
+    assert np.sum(np.abs(lam) < 1e-12) == 24
+    assert np.allclose(np.sort(lam[np.abs(lam) > 1e-12]), inner, atol=1e-12)
+    assert np.allclose(A @ X - X * lam, 0, atol=1e-10)
+
+
+@needs_inertia
 def test_generalized_scale_invariance():
     """(A, B) 同乘常数（如 mm 与 m 单位制）特征值不变：单精度计数半径 η、端点精度规划与结果都应与尺度无关。
     η 若按 ‖A‖+|x|‖B‖ 计会随尺度缩放：同乘 1e-6 时声称的 η 比实际误差小百万倍，同乘 1e6 时全程退回双精度。"""
