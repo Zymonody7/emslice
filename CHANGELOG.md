@@ -7,6 +7,8 @@
 ### 新增
 - 有限元算例生成器 `emslice/femgen.py`（Nédélec 棱边元，广义问题 Kx=λMx）：空腔（解析解）、介质谐振器滤波腔、
   铁氧体加载腔（复厄密）；`emslice gen fem-*`；4 个十万阶有限元基准算例，SLEPc/SciPy 基线支持广义问题。
+- 多核扩展性实测（华为鲲鹏 + openEuler，单 NUMA 节点 1–32 线程）：复厄密算例加速 15.6 倍；`bench/scaling_report.py`。
+- 演示录屏脚本 `scripts/demo.sh` 与报告摘要 `scripts/show_report.py`；作品介绍（按大赛四个评审维度组织）与架构图。
 - 降级模式：后端不提供惯性（仅 SciPy SuperLU）时三种查询模式均可求解，报告中注明未出证书。
 - CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式；端到端冒烟（生成 → 求解 → 复核 → 证书）。
 - 贡献指南、安全策略、行为准则、路线图。

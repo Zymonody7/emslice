@@ -48,7 +48,9 @@ def main(d, title=""):
                 bw = "—" if r.get("backward_max") is None else f"{r['backward_max']:.1e}"
                 lines.append(f"| {name} | {solver} | {t} | {sec:.1f} | {sp:.2f} | {fs} | "
                              f"{'✅' if r.get('certified') else '—'} | {bw} |")
-            curves[(name, solver)] = pts
+            bad = any(r.get("error") or not r.get("k") or (r.get("backward_max") or 0) > 1e-8
+                      for (s2, _), r in rows.items() if s2 == solver)
+            curves[(name, solver)] = (pts, bad)
     out = os.path.join(d, "scaling.md")
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -72,16 +74,19 @@ def plot(curves, d, title):
     plt.rcParams["axes.unicode_minus"] = False
     fig, axs = plt.subplots(1, 2, figsize=(11, 4.2))
     tmax = 1
-    for (name, solver), pts in curves.items():
+    names = list(dict.fromkeys(n for n, _ in curves))
+    colors = {n: plt.cm.tab10(i) for i, n in enumerate(names)}
+    for (name, solver), (pts, bad) in curves.items():
         pts = [p for p in pts if p[1]]
         if not pts:
             continue
         t = np.array([p[0] for p in pts])
         tmax = max(tmax, t.max())
         ls = "-" if solver == "emslice" else "--"
-        lab = f"{name}（{solver}）"
-        axs[0].plot(t, [p[1] for p in pts], ls, marker="o", ms=4, label=lab)
-        axs[1].plot(t, [p[2] for p in pts], ls, marker="o", ms=4, label=lab)
+        lab = f"{name}（{solver}{'，结果错误/为空' if bad else ''}）"
+        kw = dict(color=colors[name], marker="o" if solver == "emslice" else "x", ms=4, label=lab)
+        axs[0].plot(t, [p[1] for p in pts], ls, **kw)
+        axs[1].plot(t, [p[2] for p in pts], ls, **kw)
     ideal = np.array([1, tmax])
     axs[1].plot(ideal, ideal, ":", color="gray", label="理想线性")
     for ax in axs:
@@ -91,7 +96,8 @@ def plot(curves, d, title):
     axs[0].set_yscale("log")
     axs[0].set_ylabel("耗时 (s)")
     axs[1].set_ylabel("加速比（相对 1 线程）")
-    axs[1].legend(fontsize=7, frameon=False)
+    axs[1].legend(fontsize=6.5, frameon=False)
+    axs[0].text(0.02, 0.02, "实线 = emslice（全部证书通过）；虚线 = SLEPc", transform=axs[0].transAxes, fontsize=7)
     if title:
         fig.suptitle(title, fontsize=10)
     fig.tight_layout()

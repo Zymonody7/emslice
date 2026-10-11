@@ -7,7 +7,7 @@
 - [x] 降级模式：仅 SciPy 时三种查询模式均可用；CI 覆盖完整后端与降级模式
 - [x] 有限元场景：Nédélec 棱边元离散的空腔 / 介质谐振滤波腔 / 铁氧体加载腔，广义问题 $Ax=\lambda Bx$ 端到端示例与基准
 - [x] Linux 验证：Docker（aarch64）与鲲鹏 + openEuler 上测试通过
-- [ ] 并行扩展性曲线（1/2/4/8/16/32 线程，`bench/scaling_report.py`）
+- [x] 并行扩展性曲线（鲲鹏单 NUMA 节点 1–32 线程，`results/scaling-kunpeng/`）
 - [ ] 接入命题方样例数据（如获提供），按其配置与输出规范出报告
 
 ## v0.3 ——规模与资源

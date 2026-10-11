@@ -99,7 +99,9 @@ scripts/   reproduce.sh 一键复现
 - [x] 方案说明文档 PDF
 - [x] 有限元（Nédélec）广义问题场景（`results/fem/report.md`）
 - [x] Linux 验证：Docker（Linux aarch64，conda-forge 全量环境）18/18 测试通过；华为鲲鹏（HiSilicon，640 核）+ openEuler 22.03 上 17 项通过（1 项因未装 gmsh 跳过）
-- [ ] 多核扩展性实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
+- [x] 多核扩展性（鲲鹏单 NUMA 节点 1–32 线程）：复厄密算例加速 15.6 倍，24 次运行全部证书通过（`results/scaling-kunpeng/`）
+- [x] 演示录屏脚本 `scripts/demo.sh`、作品介绍 `docs/作品介绍.pdf`
+- [ ] 录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
 
 ## 参与贡献
 
