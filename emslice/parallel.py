@@ -36,7 +36,7 @@ def _init(A, B, opts: dict, threads=1, warm=False):
     _set_threads(threads)
     if warm:  # 预做符号分析：在远离谱的位移处做一次计数分解（结果丢弃）
         try:
-            s.count_below(-1.1 * s.nA / max(s.nB, 1e-300), prec=s.count_prec)
+            s.count_below(-1.1 * s.lam_unit, prec=s.count_prec)
         except Exception:  # pragma: no cover - 预热失败不影响后续计数
             pass
         s.rep.factorizations.clear()

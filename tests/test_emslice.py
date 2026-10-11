@@ -206,6 +206,65 @@ def test_generalized_angle_bound():
         assert np.linalg.norm(y - E @ (E.T @ y)) <= b + 1e-14
 
 
+def _clustered(n_each, values, seed):
+    """近简并簇：若干值各重复多次，再加 1e-9 量级的随机对称扰动（簇宽 ~1e-9）。"""
+    rng = np.random.default_rng(seed)
+    base = np.repeat(values, n_each)
+    n = base.size
+    E = sp.random(n, n, density=3.0 / n, random_state=seed)
+    A = sp.csr_matrix(sp.diags(base) + 1e-9 * (E + E.T))
+    p = rng.permutation(n)
+    A = sp.csr_matrix(A[p][:, p])
+    return A, np.linalg.eigvalsh(A.toarray())
+
+
+@needs_inertia
+def test_interval_whole_spectrum_of_small_matrix():
+    """区间含小矩阵的全部特征值（6 个值各约 30 重）：所需 Krylov 基覆盖整个空间，直接 Rayleigh-Ritz 一次求全
+    （此前基维数受 n − 锁定数所限，每轮收缩只多得 1 个，8 轮后仍缺 7 个）。"""
+    A, w = _clustered([34, 38, 33, 26, 38, 30], [0.77, 1.27, 1.71, 3.19, 3.32, 3.4], 2)
+    lam, _, rep = Solver(A, None, Options(k=20, which="interval", interval=(0.5, 3.8))).solve()
+    assert rep.certified and lam.size == A.shape[0]
+    assert np.allclose(np.sort(lam), w, atol=1e-12)
+
+
+@needs_inertia
+def test_narrow_slice_keeps_shift_inside():
+    """切片窄于标准扰动量（1e-10·‖A‖）且中点贴着特征值：位移扰动须留在片内，否则 Krylov 找的是片外特征值。"""
+    A, w = _clustered([30, 30], [1.0, 4.42], 5)
+    hi = w[w > 4]
+    gaps = np.diff(hi)
+    j = 1 + int(np.argmax(np.minimum(gaps[:-1], gaps[1:])))   # 两侧间隙都较大的簇内特征值
+    h = 0.5 * min(gaps[j - 1], gaps[j])
+    a, b = hi[j] - h, hi[j] + h                                # 中点恰为特征值，片宽 ≪ 1e-10·‖A‖
+    assert b - a < 1e-10 * abs(A).sum(0).max()
+    lam, _, rep = Solver(A, None, Options(k=1, which="interval", interval=(float(a), float(b)))).solve()
+    ref = w[(w >= a) & (w < b)]
+    assert rep.certified and lam.size == ref.size and np.allclose(lam, ref, atol=1e-13)
+
+
+@needs_inertia
+def test_generalized_scale_invariance():
+    """(A, B) 同乘常数（如 mm 与 m 单位制）特征值不变：单精度计数半径 η、端点精度规划与结果都应与尺度无关。
+    η 若按 ‖A‖+|x|‖B‖ 计会随尺度缩放：同乘 1e-6 时声称的 η 比实际误差小百万倍，同乘 1e6 时全程退回双精度。"""
+    A, _ = preset("puck", 6)
+    n = A.shape[0]
+    R = sp.random(n, n, density=3.0 / n, random_state=1)
+    Bm = sp.csr_matrix(sp.identity(n) * 2 + 0.3 * (R + R.T) / abs(R + R.T).sum(1).max())
+    ref = None
+    for c in (1.0, 1e-6, 1e6):
+        lam, _, rep = Solver(c * A, c * Bm, Options(k=10, sigma=124.0)).solve()
+        cert = rep.certificate
+        assert rep.certified and cert["kind"] == "mixed-window"
+        got = (np.sort(lam), cert["count_precision"], np.asarray(cert["eta"], float))
+        if ref is None:
+            ref = got
+            continue
+        assert np.allclose(got[0], ref[0], rtol=1e-12, atol=0)
+        assert got[1] == ref[1]
+        assert np.allclose(got[2], ref[2], rtol=1e-9)
+
+
 @needs_inertia
 def test_memory_limit_switches_to_out_of_core(tmp_path, monkeypatch):
     """内存上限过小时 MUMPS 报 INFOG(1)=-19（PETSc 不抛异常，惯性无效）：须检出并自动改用外存重试，结果不变。"""

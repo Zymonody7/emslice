@@ -2,7 +2,8 @@
 
 覆盖：nearest / above / below / interval 四种查询；实对称 / 复厄密；标准 / 广义（随机正定 B）；
 随机不定稀疏矩阵、近简并大簇（6 个值各重复约百次 + 1e-9 扰动）、Yee 旋度-旋度矩阵；
-σ 恰为特征值、σ 在谱外、随机位置；k ∈ {1,2,5,10,20}；单精度/双精度计数；串行/进程池。
+σ 恰为特征值、σ 在谱外、随机位置；k ∈ {1,2,5,10,20}；单精度/双精度计数；串行/进程池；
+广义问题的 (A, B) 随机同乘 10^±8 以内的常数（检验阈值与单位制无关）。
 
 判定：特征值集合正确（σ 恰为特征值时“含/不含 σ”两种口径都接受）、证书未报失败、后向误差 ≤ tol、
 子空间夹角上界不小于真实夹角。证书报告“未通过”而结果不全的算例单独统计（如实报告，不算静默错误）。
@@ -54,6 +55,8 @@ def one_case(rng):
     if gen:
         R = sp.random(n, n, density=3.0 / n, random_state=rng.integers(1 << 30))
         B = sp.csr_matrix(sp.identity(n) * 2 + 0.3 * (R + R.T) / max(1, abs(R + R.T).sum(1).max()))
+        c = 10.0 ** rng.uniform(-8, 8) if rng.random() < 0.5 else 1.0
+        A, B = sp.csr_matrix(c * A), sp.csr_matrix(c * B)
     w = la.eigh(A.toarray(), None if B is None else B.toarray(), eigvals_only=True)
     which = str(rng.choice(["nearest", "nearest", "above", "below", "interval"]))
     k = int(rng.choice([1, 2, 5, 10, 20]))

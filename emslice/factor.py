@@ -15,8 +15,10 @@
 
 混合精度：只要惯性的分解可用单精度 LDLᵀ（PETSc -pc_precision single，MUMPS smumps）。
 由 Sylvester 定理，单精度分解给出的是邻近矩阵 A − xB + E 的精确惯性，‖E‖ 量级为 u_s·‖A − xB‖；
-因此计数点与所有特征值的距离大于 η = SINGLE_ETA·u_s·(‖A‖ + |x|‖B‖) 时计数精确
-（鲲鹏实测：距离 ≥ 1e-6·(‖A‖+|x|‖B‖) 时单精度与双精度计数逐一相同，1e-7 起开始出错；SINGLE_ETA=100 留出 5–60 倍余量）。
+换算到特征值：|Δλ| ≤ ‖E‖/λ_min(B) ≤ cond(B)·u_s·(‖A‖/‖B‖ + |x|)（Weyl 定理作用于 B^{-1/2}(A − xB + E)B^{-1/2}）。
+取 η = SINGLE_ETA·u_s·(‖A‖/‖B‖ + |x|)：以 ‖A‖/‖B‖ 为特征值单位，(A, B) 同乘常数时 η 不变（与 mm/m 单位制无关）；
+cond(B) 与 MUMPS 缩放后实际远小于范数界的分解误差一并由实测标定吸收（鲲鹏实测：标准问题距离 ≥ 1e-6 倍尺度时
+单精度与双精度计数逐一相同，1e-7 起开始出错；有限元广义问题 3e-8–1e-7 倍尺度仍全部一致；η = 1.2e-5 倍尺度，余量 ≥ 40 倍）。
 证书逻辑据此只对“收缩 η 后的窗口”下结论，见 solver.py。
 """
 from __future__ import annotations
@@ -47,10 +49,10 @@ U_SINGLE = float(np.finfo(np.float32).eps)
 SINGLE_ETA = 100.0
 
 
-def count_eta(precision: str, nS: float) -> float:
-    """惯性计数的不确定半径 η（特征值单位）：|λ − x| > η 的特征值一定被正确计数。
-    双精度沿用零主元阈值的量级（1e-10·‖S‖ 内视为近奇异并扰动），单精度见模块说明。"""
-    return (SINGLE_ETA * U_SINGLE if precision == "single" else 1e-12) * nS
+def count_eta(precision: str, scale: float) -> float:
+    """惯性计数的不确定半径 η（特征值单位）：|λ − x| > η 的特征值一定被正确计数。scale = ‖A‖/‖B‖ + |x|。
+    双精度沿用零主元阈值的量级（1e-10 倍尺度内视为近奇异并扰动），单精度见模块说明。"""
+    return (SINGLE_ETA * U_SINGLE if precision == "single" else 1e-12) * scale
 
 
 def real_embedding(S):

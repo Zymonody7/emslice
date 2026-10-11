@@ -8,6 +8,7 @@
   * 完全再正交化（两遍经典 Gram-Schmidt，DGKS）——数十万阶以内开销可忽略，换取数值稳健；
   * 锁定集 X_L：与已知特征向量 B-正交地收缩（用于找回漏掉的重特征值）；
   * 块失效（不变子空间）时以随机方向补齐并将对应耦合系数置零。
+  * 所需基维数覆盖锁定集的整个正交补时（小矩阵）直接在正交补上做 Rayleigh-Ritz。
 """
 from __future__ import annotations
 
@@ -111,6 +112,33 @@ def _select(theta, which):
     raise ValueError(which)
 
 
+def _full_space(apply_op, n, n_rem, nev, which, dtype, inner, XL, rng, p, tol, deflate):
+    """所需 Krylov 基已覆盖锁定集的整个 B-正交补（小矩阵，或几乎全部特征向量已锁定）：直接在正交补上做 Rayleigh-Ritz，
+    结果精确到舍入。块 Krylov 在此情形下基维数受 n − 锁定数所限，每轮只能多得一两个（n=199、区间含全部特征值时
+    8 轮收缩后仍缺 7 个）。"""
+    W0 = rng.standard_normal((n, n_rem))
+    if np.dtype(dtype).kind == "c":
+        W0 = W0 + 1j * rng.standard_normal((n, n_rem))
+    W0 = deflate(np.asarray(W0, dtype=dtype, order="F"))
+    Q, _ = _block_orth(W0, inner, XL, rng)
+    TQ = np.empty_like(Q)
+    for j in range(0, n_rem, p):
+        TQ[:, j : j + p] = apply_op(Q[:, j : j + p])
+    deflate(TQ)
+    H = inner(Q, TQ)
+    theta, S = la.eigh(0.5 * (H + H.conj().T))
+    order = _select(theta, which)
+    theta, S = theta[order], S[:, order]
+    X = Q @ S
+    resid = inner.norms(TQ @ S - X * theta)
+    floor = 100.0 * np.finfo(float).eps * np.sqrt(n_rem) * np.abs(theta).max()
+    conv = resid <= np.maximum(tol * np.abs(theta), floor)
+    k = min(nev, n_rem)
+    return KSResult(theta=theta[:k], X=X[:, :k], resid=resid[:k], converged=bool(conv[:k].all()), restarts=0,
+                    n_apply=n_rem, theta_extra=theta[k:], conv_mask=conv[:k].copy(),
+                    X_extra=X[:, k : k + p] if k < n_rem else None)
+
+
 def krylov_schur(
     apply_op: Callable[[np.ndarray], np.ndarray],
     n: int,
@@ -142,13 +170,20 @@ def krylov_schur(
     nev_eff = min(nev, max(m - p, 1))
     XL = locked if (locked is not None and locked.shape[1]) else None
 
-    V = np.zeros((n, m + p), dtype=dtype, order="F")  # 列主序：列切片连续，避免 BLAS 前的整块拷贝
-    H = np.zeros((m + p, m), dtype=dtype)
-
     def deflate(W):
         if XL is not None:
             _project_out(W, XL, inner)
         return W
+
+    n_rem = n - (0 if XL is None else XL.shape[1])
+    if n_rem <= 0:
+        e = np.empty(0)
+        return KSResult(theta=e, X=np.empty((n, 0), dtype), resid=e, converged=True, restarts=0, n_apply=0)
+    if int(np.ceil(ncv / p) * p) + p >= n_rem:
+        return _full_space(apply_op, n, n_rem, nev, which, dtype, inner, XL, rng, p, tol, deflate)
+
+    V = np.zeros((n, m + p), dtype=dtype, order="F")  # 列主序：列切片连续，避免 BLAS 前的整块拷贝
+    H = np.zeros((m + p, m), dtype=dtype)
 
     if v0 is None:
         W0 = rng.standard_normal((n, p))

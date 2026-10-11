@@ -139,7 +139,7 @@ def onenorm(M) -> float:
 
 class Solver:
     NEAR_SINGULAR_GROWTH = 1e12
-    # 算子位移的预偏移（相对 ‖A‖）：σ 恰为谐振点时免去一次“检测→重分解”。
+    # 算子位移的预偏移（相对特征值尺度 ‖A‖/‖B‖，下同记作 ‖A‖）：σ 恰为谐振点时免去一次“检测→重分解”。
     # 偏移太小 ⇒ cond(A−sI) 过大，求解噪声污染远处特征对（实测 1e-11 时后向误差 1e-10，1e-9 时 1e-12）；
     # 偏移太大 ⇒ 在谱跨度极大的矩阵上（如 ‖A‖=4e10、局部谱间距 0.3）改变“距 σ 最近”的集合。
     # 因此先用 1e-9‖A‖，求得局部半径 r_k 后若偏移 > 1% r_k，再按局部尺度 1e-4·r_k 重分解一次（见 _solve_nearest）；
@@ -156,6 +156,9 @@ class Solver:
         self.dtype = np.complex128 if self.cplx else np.float64
         self.nA = onenorm(self.A)
         self.nB = onenorm(self.B)
+        # 特征值量纲的尺度 ‖A‖/‖B‖：(A, B) 同乘常数时特征值不变，以特征值为单位的阈值（计数半径 η、零阈值、预偏移、簇容差…）
+        # 都按它取，结果与用户的单位制（mm 或 m）无关。标准问题 ‖B‖ = 1，即 ‖A‖
+        self.lam_unit = self.nA / self.nB
         self.pattern = ShiftedPattern(self.A, self.B)
         self.backend = self.o.backend if self.o.backend != "auto" else available_backends()[0]
         # 计数精度：单精度 LDLᵀ 只给出“邻近矩阵”的精确惯性，凡进入证书的计数都检查 η 裕量，不足时回退双精度
@@ -184,23 +187,28 @@ class Solver:
     # ------------------------------------------------------------------ 分解
     def eta(self, x: float, prec: str) -> float:
         """位移 x 处惯性计数的不确定半径（见 factor.count_eta）。"""
-        return count_eta(prec, self.nA + abs(x) * self.nB)
+        return count_eta(prec, self.lam_unit + abs(x))
 
     def _factor(self, shift: float, purpose: str, keep: bool, direction: int = 0, max_delta: float = INF,
-                prec: str = "double"):
+                prec: str = "double", near_ok: bool = False):
         """带自适应位移的分解。
 
         位移贴近（或恰为）特征值时 A − σB 近奇异：惯性符号不可靠、求解放大舍入误差。
         检测手段：MUMPS 零主元 + 随机探针求解的增长因子 ‖x‖‖S‖/‖b‖。
-        处理：按 ‖A‖ 尺度逐级扰动（1e-10, 1e-8, …），direction 指定扰动方向
+        处理：按特征值尺度 ‖A‖/‖B‖ 逐级扰动（1e-10, 1e-8, …），direction 指定扰动方向
         （above 模式向下、below 模式向上，保证贴近 σ 的特征值仍落在所求一侧）。
+        near_ok：只用于求解、不用惯性的分解（切片）。扰动须在 max_delta 内（不离开切片）；窄切片（近同值簇，
+        片宽小于标准扰动量）在片内取点，仍近奇异则保留增长因子最小的位移——Krylov 噪声地板按增长因子放宽、
+        随后的精化与残差核对兜底；有零主元（精确奇异）时不保留。
         """
-        scale = max(self.nA, np.finfo(float).tiny)
+        scale = max(self.lam_unit, np.finfo(float).tiny)
         prec = "double" if keep else prec
         eta0 = self.eta(shift, prec) if prec == "single" else 0.0
         delta = 0.0
         reasons = []
-        for attempt in range(8):
+        cands = []          # near_ok：仅因增长因子被拒的位移 (增长因子, 扰动)
+        force = False
+        for attempt in range(10):
             x = shift + delta
             slot = None
             if self.backend == "petsc":
@@ -240,6 +248,11 @@ class Solver:
                     reason = f"{F.inertia[1]} 个零主元"
                 elif F.stats.get("growth", 0.0) > self.NEAR_SINGULAR_GROWTH:
                     reason = f"探针增长因子 {F.stats['growth']:.1e}"
+            if reason is not None and force and F is not None and not (F.inertia is not None and F.inertia[1] > 0):
+                self.rep.diagnostics.append(
+                    f"[近奇异位移] {purpose} 片宽 {2 * max_delta:.2e} 小于标准扰动量，保留片内最优位移 {x:.15g}（{reason}），"
+                    f"Krylov 噪声地板按增长因子放宽")
+                reason, delta = None, 0.0
             if reason is None:
                 self.rep.factorizations.append(dict(F.stats, shift=x, purpose=purpose, inertia=F.inertia))
                 if keep and slot is not None:
@@ -252,14 +265,26 @@ class Solver:
                 if not keep:
                     F.free()
                 return F, x
+            if near_ok and F is not None and not (F.inertia is not None and F.inertia[1] > 0):
+                cands.append((F.stats.get("growth", INF), delta))
             if F is not None:
                 F.free()
             reasons.append(reason)
+            if force:
+                break
             # 单精度计数的扰动从 2η 起步（更小的扰动在单精度下无意义）
             mag = max(1e-10 * 100 ** (attempt // 2) * scale, 2 * eta0 * 3 ** attempt)
             sgn = direction if direction else (1 if attempt % 2 == 0 else -1)
             delta = sgn * mag * (1 + 0.1 * attempt)
-            if abs(delta) > max_delta:
+            if near_ok and abs(delta) > max_delta:
+                if attempt < 4:      # 窄切片：在片内 ±(0.3, 0.45, 0.6, 0.8)·max_delta 处取点
+                    delta = sgn * max_delta * (0.3, 0.45, 0.6, 0.8)[attempt]
+                elif cands:
+                    delta, force = min(cands)[1], True
+                    continue
+                else:
+                    break
+            elif abs(delta) > max_delta:
                 break
         raise NearSingularError(f"在 {shift} 附近多次扰动后仍奇异: {reasons}")
 
@@ -473,7 +498,7 @@ class Solver:
         广义问题的 ‖·‖_{B⁻¹} 由共轭梯度求得（见 _binv_norms）。"""
         lo, hi, known = self._known
         known = np.sort(np.asarray(known, dtype=float))
-        tol_c = 1e-8 * max(np.abs(lam).max(), 1e-3 * self.nA)
+        tol_c = 1e-8 * max(np.abs(lam).max(), 1e-3 * self.lam_unit)
         cuts = np.flatnonzero(np.diff(lam) > tol_c) + 1
         # Rayleigh-Ritz 给出的 Ritz 向量彼此 B-正交：按 B-范数归一后各列残差的 ‖·‖_{B⁻¹} 只需一次共轭梯度
         BX = X if self.B is None else self.B @ X
@@ -621,7 +646,7 @@ class Solver:
             c, m = 0.5 * (a + b), max(int(o.slice_max), 1)
         else:
             c, m = float(o.sigma), 2 * int(o.k)
-        F, s_used = self._factor(c + self.PRE_OFFSET * (min(self.nA, 1e3 * abs(c)) if c else self.nA), "shift", keep=True)
+        F, s_used = self._factor(c + self.PRE_OFFSET * (min(self.lam_unit, 1e3 * abs(c)) if c else self.lam_unit), "shift", keep=True)
         self.rep.shifts.append(s_used)
         try:
             for _ in range(o.max_rounds):
@@ -656,8 +681,8 @@ class Solver:
         o = self.o
         if k <= 0:
             raise ValueError("k 必须为正")
-        # 预偏移尺度：‖A‖，但 σ≠0 时不超过 1e3·|σ|（谱跨度极大的矩阵上避免偏移超过局部谱间距）
-        scale = min(self.nA, 1e3 * abs(sigma)) if sigma != 0 else self.nA
+        # 预偏移尺度：‖A‖/‖B‖，但 σ≠0 时不超过 1e3·|σ|（谱跨度极大的矩阵上避免偏移超过局部谱间距）
+        scale = min(self.lam_unit, 1e3 * abs(sigma)) if sigma != 0 else self.lam_unit
         F, s_used = self._factor(sigma + self.PRE_OFFSET * scale, "shift", keep=True)
         self.rep.shifts.append(s_used)
         self._memory_guard(F.stats.get("mem_mb_used"))
@@ -683,7 +708,7 @@ class Solver:
         # 改在 σ + 1e-3·r_k 处重分解（max|θ|/|θ_k| ≈ 1e3），只在确实未达标时付出这次分解
         too_close = (abs(s_used - sigma) < 1e-3 * rk and lam.size
                      and self.residuals(lam[:k], X[:, :k])[1].max() > o.tol)
-        if lam.size and (too_far or too_close) and rk > 1e-11 * self.nA:
+        if lam.size and (too_far or too_close) and rk > 1e-11 * self.lam_unit:
             # 预偏移相对局部谱尺度过大（谱跨度极大的矩阵）：按局部尺度重分解，并以已得向量热启动
             s_new = sigma + (1e-4 if too_far else 1e-3) * rk * 0.6180339887
             self.rep.diagnostics.append(
@@ -716,7 +741,7 @@ class Solver:
             if done:
                 F.free()
                 return lam[:k], X[:, :k]
-        zero = 1e-11 * self.nA
+        zero = 1e-11 * self.lam_unit
         for rnd in range(o.max_rounds):
             rk = float(np.abs(lam[:k] - sigma).max())
             rho = rk - max(1e-7 * rk, zero)
@@ -794,13 +819,13 @@ class Solver:
             return None
         rk = float(np.sort(np.abs(lam - sigma))[k - 1])
         eta = self.eta(abs(sigma) + 2 * rk, "single")
-        tau = max(1e-7 * rk, 1e-11 * self.nA)
+        tau = max(1e-7 * rk, 1e-11 * self.lam_unit)
         if rk < 10 * eta:   # 目标簇贴近 σ（如 σ 落在零空间簇上）：单精度分辨率不够
             return None
         ritz = np.asarray(ritz, dtype=float)
         ritz = ritz[np.isfinite(ritz)]
 
-        ctol = 1e-8 * max(abs(sigma) + rk, 1e-3 * self.nA)
+        ctol = 1e-8 * max(abs(sigma) + rk, 1e-3 * self.lam_unit)
 
         def plan(side):
             d = np.abs(lam - sigma)[np.sign(lam - sigma) == side]
@@ -899,7 +924,7 @@ class Solver:
             if inside == found_in:
                 lam, X = self._order(lam, X, sigma, "nearest")
                 rk = float(np.abs(lam[:k] - sigma).max())
-                need = rk - max(1e-7 * rk, 1e-11 * self.nA)
+                need = rk - max(1e-7 * rk, 1e-11 * self.lam_unit)
                 if not (x_lo + e_lo <= sigma - need and x_hi - e_hi >= sigma + need):
                     return False, lam, X, F
                 self.rep.certified = True
@@ -928,7 +953,7 @@ class Solver:
         """第 k 个特征值是重特征值且部分副本落在前 k 个之外时说明（并列者任取其一均正确）。"""
         if lam.size <= k:
             return
-        tol = 1e-8 * max(abs(lam[k - 1]), 1e-3 * self.nA)
+        tol = 1e-8 * max(abs(lam[k - 1]), 1e-3 * self.lam_unit)
         mult = int(np.sum(np.abs(lam - lam[k - 1]) <= tol))
         inc = int(np.sum(np.abs(lam[:k] - lam[k - 1]) <= tol))
         if mult > inc:
@@ -939,7 +964,7 @@ class Solver:
     def _cluster_note(self, sigma, rk, F=None, s_used=None):
         """σ 恰为高重数特征值（如旋度-旋度算子的梯度零空间）：报告其重数。
         簇上端直接用位移分解自带的惯性（位移 s 在 (σ+r_k, σ+w) 内，簇全部在 s 之下），只需在 σ−w 处计数一次。"""
-        w = max(1e-8 * self.nA, 10 * rk)
+        w = max(1e-8 * self.lam_unit, 10 * rk)
         try:
             if F is not None and F.inertia is not None and sigma + rk < s_used < sigma + w:
                 (n_lo, _), = self.counts([(sigma - w, INF, 0)])
@@ -972,8 +997,8 @@ class Solver:
         if k <= 0:
             raise ValueError("k 必须为正")
         sgn = 1 if which == "above" else -1
-        x0_req = sigma
-        d0 = max(k * 2.0 * self.nA / self.n, 1e-6 * max(abs(sigma), self.nA * 1e-3))
+        x0_req, k_req = sigma, k
+        d0 = max(k * 2.0 * self.lam_unit / self.n, 1e-6 * max(abs(sigma), self.lam_unit * 1e-3))
         w = max(1, self.conc["count"])
         # 第一批：d0 附近 + 低三个数量级的点（应对谱跨度极大的矩阵，如对角元 1e2~1e10）
         first = [d0, d0 * 16, d0 * 1e-3, d0 * 4][: max(1, w)]
@@ -1025,6 +1050,16 @@ class Solver:
         eb = self.eta(xb, self.count_prec) if self.count_prec == "single" else 0.0
         a, b, na, nbb, ea_, eb_ = (x0, xb, n0, nb, 0.0, eb) if sgn > 0 else (xb, x0, nb, n0, eb, 0.0)
         lam, X = self._solve_range(a, b, na, nbb, ea_, eb_)
+        if eb and lam.size < k and self.rep.certificate.get("count", k) < k:
+            # 单精度括区终点 η 邻域内恰有特征值、且实际在区间外：双精度重数后区间内不足 k 个。
+            # 罕见（随机压力测试 600 例中 1 例）——改用双精度计数重新括区求解，而不是返回不足 k 个的结果
+            self.rep.diagnostics.append(f"[括区] 单精度括区终点贴近特征值，双精度重数后区间内仅 "
+                                        f"{self.rep.certificate['count']} 个（需 {k}）：改用双精度计数重新括区")
+            saved, self.count_prec = self.count_prec, "double"
+            try:
+                return self._solve_one_sided(sigma, k_req, which)
+            finally:
+                self.count_prec = saved
         # 以 σ 处实际计数点 x0 为界（σ 贴近特征值时 x0 已向“包含 σ”的一侧扰动）：与括区计数口径一致，
         # 恰在 σ 上的特征值即使数值上落在 σ 另一侧 1e-16 处也计入
         lam, X = self._order(lam, X, x0, which)
@@ -1112,8 +1147,8 @@ class Solver:
             self.rep.diagnostics.append(f"[簇] 切片 [{sa:.10g},{sb:.10g}) 含 {cnt} 个近同值特征值（如梯度零空间），"
                                         f"超出可整体求解的规模，未求特征向量；其重数由惯性计数给出")
             return np.empty(0), np.empty((self.n, 0), self.dtype)
-        off = min(self.PRE_OFFSET * self.nA, 1e-4 * (sb - sa) * 0.6180339887)
-        F, s_used = self._factor(0.5 * (sa + sb) + off, "slice", keep=True)
+        off = min(self.PRE_OFFSET * self.lam_unit, 1e-4 * (sb - sa) * 0.6180339887)
+        F, s_used = self._factor(0.5 * (sa + sb) + off, "slice", keep=True, max_delta=0.45 * (sb - sa), near_ok=True)
         self.rep.shifts.append(s_used)
         self._memory_guard(F.stats.get("mem_mb_used"))
         lam, X = self._refine(F, self._shift_invert(F, s_used, cnt, "nearest"))
@@ -1161,7 +1196,7 @@ class Solver:
             need = []
             for (sa, sb, ca, cb, depth) in todo:
                 width = sb - sa
-                if cb - ca <= self.o.slice_max or depth >= 60 or width <= 1e-9 * max(abs(sa), abs(sb), self.nA * 1e-6):
+                if cb - ca <= self.o.slice_max or depth >= 60 or width <= 1e-9 * max(abs(sa), abs(sb), self.lam_unit * 1e-6):
                     if cb > ca:
                         if cb - ca > self.o.slice_max:
                             self.rep.diagnostics.append(f"切片 [{sa:.10g},{sb:.10g}) 含 {cb - ca} 个近同值特征值，作为整体求解")
