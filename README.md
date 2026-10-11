@@ -46,6 +46,10 @@ emslice solve data/small/cube20.npz --interval 100 300
 # 用配置文件
 emslice solve --config configs/default.yaml
 
+# 有限元广义问题 Kx=λMx（需 scikit-fem；fem-dr/fem-ferrite 另需 gmsh）：介质谐振器滤波腔，约 10 万阶
+emslice gen fem-dr --out data/fem/dr.npz            # 写出 dr.npz (K)、dr_B.npz (M)、dr.json（网格信息）
+emslice solve data/fem/dr.npz --B data/fem/dr_B.npz --sigma 1e-6 --which above -k 10 --out result/dr
+
 # 独立复核残差与正交性
 emslice check data/small/cube20.npz result
 ```
@@ -65,10 +69,19 @@ emslice check data/small/cube20.npz result
 
 解析解与稠密求解对比误差 ~1e-15（见 `tests/`）。
 
+`emslice/femgen.py` 生成**有限元**（一阶 Nédélec 棱边元）广义问题 `K x = k₀² M x`，即电磁 FEM 软件实际产生的矩阵形态
+（非结构四面体网格、曲面介质、高介电对比度、梯度零空间维数 = 内部节点数），长度单位 mm，频率 f = c√λ/2π：
+
+* **fem-cavity**：空矩形腔，连续问题有解析解；
+* **fem-dr**：介质谐振器滤波腔（ε_r=38 陶瓷圆柱 + PTFE 支撑，30×30×24 mm 铜腔），TE01δ 模约 3.36 GHz；
+* **fem-ferrite**：铁氧体加载腔，z 向偏置的旋磁张量 ⇒ **复厄密** K，可见反向旋转模的劈裂（环行器原理）。
+
+网格由 gmsh 作为独立外部程序生成（.geo → .msh），生成过程确定，矩阵逐字节可复现。
+
 ## 目录
 
 ```
-emslice/   matgen.py 测试矩阵 | io.py 读写与校验 | factor.py 分解与惯性 | krylov.py 块 Krylov-Schur | solver.py 主流程 | parallel.py 进程池 | cli.py
+emslice/   matgen.py Yee 测试矩阵 | femgen.py 有限元测试矩阵 | io.py 读写与校验 | factor.py 分解与惯性 | krylov.py 块 Krylov-Schur | solver.py 主流程 | parallel.py 进程池 | cli.py
 bench/     cases.py 基准算例 | run.py 运行器（子进程隔离内存）| baselines.py SciPy/SLEPc 对比 | report.py 汇总 | get_public.sh 公开矩阵
 tests/     单元与场景测试（pytest）
 .github/   CI（完整后端 + 降级模式）、Issue/PR 模板
@@ -80,11 +93,12 @@ scripts/   reproduce.sh 一键复现
 ## 当前进展（2026-10-10）
 
 - [x] 求解器全部核心能力；15 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
-- [x] 10 万阶基准：10 个算例（含复厄密、公开矩阵 SuiteSparse 2cubes_sphere）全部证书通过
+- [x] 10 万阶基准：10 个 Yee/公开矩阵算例 + 4 个有限元广义问题算例（含复厄密铁氧体），全部证书通过
 - [x] 与 SLEPc / SciPy 对比（`results/full/report.md`）
 - [x] 方案说明文档初稿（`docs/方案说明文档.md`）、演示视频脚本、Dockerfile、一键复现脚本
 - [x] 方案说明文档 PDF
-- [ ] 有限元（Nédélec）广义问题场景、Linux 多核实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
+- [x] 有限元（Nédélec）广义问题场景（`results/fem/report.md`）
+- [ ] Linux 多核实测、录制演示视频（见 [ROADMAP.md](ROADMAP.md)）
 
 ## 参与贡献
 

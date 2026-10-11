@@ -12,24 +12,30 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 
-def _scipy(A, k, sigma, which):
+def _scipy(A, k, sigma, which, B=None):
     w = {"nearest": "LM", "above": "LA", "below": "SA"}[which]
-    lam, X = spla.eigsh(A, k=k, sigma=sigma, which=w, tol=1e-12)
+    lam, X = spla.eigsh(A, k=k, M=B, sigma=sigma, which=w, tol=1e-12)
     return lam, X, dict(method="scipy.eigsh(shift-invert, SuperLU)")
 
 
-def _complex_from_embedding(A, lam2, U):
+def _embed(A):
+    Ar, Ai = sp.csr_matrix(A.real), sp.csr_matrix(A.imag)
+    return sp.bmat([[Ar, -Ai], [Ai, Ar]], format="csr")
+
+
+def _complex_from_embedding(A, lam2, U, B=None):
     n = A.shape[0]
     Xc = U[:n] + 1j * U[n:]
     Q, s, _ = la.svd(Xc, full_matrices=False)
     r = int(np.sum(s > 1e-8 * s[0]))
     Q = Q[:, :r]
     H = Q.conj().T @ (A @ Q)
-    w, S = la.eigh(0.5 * (H + H.conj().T))
+    G = np.eye(r) if B is None else Q.conj().T @ (B @ Q)
+    w, S = la.eigh(0.5 * (H + H.conj().T), 0.5 * (G + G.conj().T))
     return w, Q @ S
 
 
-def _slepc(A, k, sigma, which):
+def _slepc(A, k, sigma, which, B=None):
     import os
     import sys
 
@@ -44,23 +50,32 @@ def _slepc(A, k, sigma, which):
     from petsc4py import PETSc
     from slepc4py import SLEPc
 
-    cplx = np.iscomplexobj(A.data) and np.any(A.data.imag)
-    M = A
+    cplx = any(np.iscomplexobj(X.data) and np.any(X.data.imag) for X in (A, B) if X is not None)
+    M, Mb = A, B
     # SLEPc 无“σ 以上/以下 k 个”的原生查询；按常见用法求 3k 个最近者再筛选
     k_req = k if which == "nearest" else 3 * k
     nev = k_req
     if cplx:
-        Ar, Ai = sp.csr_matrix(A.real), sp.csr_matrix(A.imag)
-        M = sp.bmat([[Ar, -Ai], [Ai, Ar]], format="csr")
+        M = _embed(A)
+        Mb = None if B is None else _embed(B)
         nev = 2 * k_req
-    M = sp.csr_matrix(M, dtype=np.float64)
-    M.sort_indices()
-    mat = PETSc.Mat().createAIJ(size=M.shape, csr=(M.indptr.astype(PETSc.IntType), M.indices.astype(PETSc.IntType), M.data),
-                                comm=PETSc.COMM_SELF)
-    mat.assemble()
+
+    def petsc_mat(X):
+        X = sp.csr_matrix(X, dtype=np.float64)
+        X.sort_indices()
+        m = PETSc.Mat().createAIJ(size=X.shape, csr=(X.indptr.astype(PETSc.IntType), X.indices.astype(PETSc.IntType), X.data),
+                                  comm=PETSc.COMM_SELF)
+        m.assemble()
+        return m
+
+    mat = petsc_mat(M)
     E = SLEPc.EPS().create(comm=PETSc.COMM_SELF)
-    E.setOperators(mat)
-    E.setProblemType(SLEPc.EPS.ProblemType.HEP)
+    if Mb is None:
+        E.setOperators(mat)
+        E.setProblemType(SLEPc.EPS.ProblemType.HEP)
+    else:
+        E.setOperators(mat, petsc_mat(Mb))
+        E.setProblemType(SLEPc.EPS.ProblemType.GHEP)
     E.setType(SLEPc.EPS.Type.KRYLOVSCHUR)
     E.setDimensions(nev=nev)
     E.setTarget(sigma)
@@ -86,7 +101,7 @@ def _slepc(A, k, sigma, which):
     meta = dict(method="SLEPc Krylov-Schur + sinvert + MUMPS", nconv=int(nconv), its=int(E.getIterationNumber()))
     X = U
     if cplx:
-        lam, X = _complex_from_embedding(A, lam, U)
+        lam, X = _complex_from_embedding(A, lam, U, B)
         order = np.argsort(np.abs(lam - sigma))[:k_req]
         lam, X = lam[order], X[:, order]
     if which != "nearest":
@@ -99,9 +114,9 @@ def _slepc(A, k, sigma, which):
     return lam, X, meta
 
 
-def run_baseline(name, A, k, sigma, which, **_):
+def run_baseline(name, A, k, sigma, which, B=None, **_):
     if name == "scipy":
-        return _scipy(A, k, sigma, which)
+        return _scipy(A, k, sigma, which, B)
     if name == "slepc":
-        return _slepc(A, k, sigma, which)
+        return _slepc(A, k, sigma, which, B)
     raise ValueError(name)

@@ -87,10 +87,25 @@ def cmd_solve(a):
 
 def cmd_gen(a):
     from .io import save_matrix
+
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    if a.preset.startswith("fem-"):
+        from .femgen import preset as fem_preset
+
+        K, M, meta = fem_preset(a.preset, a.h)
+        root, ext = os.path.splitext(a.out)
+        out_b = f"{root}_B{ext or '.npz'}"
+        save_matrix(a.out, sp_triu(K) if a.upper else K)
+        save_matrix(out_b, sp_triu(M) if a.upper else M)
+        with open(f"{root}.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=1)
+        print(f"{a.preset} h={meta['h_mm']}mm: n={K.shape[0]} nnz(K)={K.nnz} dtype={K.dtype} "
+              f"梯度零空间={meta['null_dim']} → K: {a.out}  M: {out_b}")
+        print(f"求解示例：emslice solve {a.out} --B {out_b} --sigma 1e-6 --which above -k 10")
+        return 0
     from .matgen import preset
 
     A, g = preset(a.preset, a.N)
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     save_matrix(a.out, sp_triu(A) if a.upper else A)
     print(f"{a.preset} N={a.N}: n={A.shape[0]} nnz={A.nnz} dtype={A.dtype} → {a.out}")
     return 0
@@ -167,8 +182,10 @@ def build_parser():
     s.set_defaults(func=cmd_solve)
 
     g = sub.add_parser("gen", help="生成电磁测试矩阵")
-    g.add_argument("preset", choices=["cavity", "cube", "puck", "bloch", "bloch-homog"])
-    g.add_argument("--N", type=int, default=32)
+    g.add_argument("preset", choices=["cavity", "cube", "puck", "bloch", "bloch-homog", "fem-cavity", "fem-dr", "fem-ferrite"],
+                   help="Yee 差分算子（标准问题），或 fem-*：Nédélec 有限元广义问题 Kx=λMx（需 scikit-fem；fem-dr/fem-ferrite 另需 gmsh）")
+    g.add_argument("--N", type=int, default=32, help="Yee 网格每方向单元数")
+    g.add_argument("--h", type=float, help="fem-* 网格尺寸（mm），默认约 10 万阶")
     g.add_argument("--out", required=True)
     g.add_argument("--upper", action="store_true", help="仅保存上三角（测试三角恢复）")
     g.set_defaults(func=cmd_gen)

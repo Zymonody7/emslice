@@ -21,12 +21,13 @@ import numpy as np
 case = json.loads(sys.argv[1]); solver = sys.argv[2]; extra = json.loads(sys.argv[3])
 from emslice.io import load_matrix
 A, info = load_matrix(case["matrix"])
+B = load_matrix(case["B"])[0] if case.get("B") else None
 t0 = time.perf_counter()
 out = dict(name=case["name"], solver=solver, n=A.shape[0], dtype=str(A.dtype))
 try:
     if solver == "emslice":
         from emslice.solver import Options, Solver
-        lam, X, rep = Solver(A, None, Options(k=case["k"], sigma=case["sigma"], which=case["which"], **extra)).solve()
+        lam, X, rep = Solver(A, B, Options(k=case["k"], sigma=case["sigma"], which=case["which"], **extra)).solve()
         out.update(certified=rep.certified, n_factor=len(rep.factorizations),
                    n_apply=sum(r["n_apply"] for r in rep.krylov_runs), diagnostics=rep.diagnostics,
                    timings=rep.timings, workers=rep.workers,
@@ -34,11 +35,11 @@ try:
                    krylov_log=[(r["nev"], r["block"], r["ncv"], r["n_apply"], r["restarts"], r["nconv"], round(r["seconds"], 2)) for r in rep.krylov_runs])
     else:
         from bench.baselines import run_baseline
-        lam, X, meta = run_baseline(solver, A, case["k"], case["sigma"], case["which"], **extra)
+        lam, X, meta = run_baseline(solver, A, case["k"], case["sigma"], case["which"], B=B, **extra)
         out.update(meta)
     out["seconds"] = time.perf_counter() - t0
     from emslice.solver import Solver as _S
-    s = _S(A)
+    s = _S(A, B)
     if lam.size:
         rn, back, rel = s.residuals(np.real(lam), X)
         out.update(k=int(lam.size), backward_max=float(back.max()), abs_res_max=float(rn.max()))
@@ -76,7 +77,7 @@ def run_case(case, solver, extra, threads, timeout):
         p = subprocess.run([sys.executable, "-c", code, json.dumps(case), solver, json.dumps(extra)], capture_output=True,
                            text=True, timeout=timeout, env=env, cwd=ROOT)
     except subprocess.TimeoutExpired:
-        return dict(name=case["name"], solver=solver, error=f"timeout {timeout}s", seconds=time.time() - t)
+        return dict(name=case["name"], solver=solver, error=f"timeout {timeout}s", seconds=float(timeout))  # 墙钟可能含系统休眠，记为时限
     for line in p.stdout.splitlines():
         if line.startswith("@@RESULT"):
             return json.loads(line[8:])

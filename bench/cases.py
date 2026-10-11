@@ -10,6 +10,7 @@ python bench/cases.py --out data/small --N 10   # 小规模冒烟测试
   near_singular  σ 与谐振点相差 1e-13 量级（A−σI 近奇异）
   complex_herm   Bloch 周期边界，复厄密矩阵
   dielectric     介质谐振器（非均匀，真实器件结构）
+  fem_*          有限元广义问题 Kx=λMx：空腔、介质谐振滤波腔、铁氧体加载腔（复厄密）
 """
 from __future__ import annotations
 
@@ -97,10 +98,50 @@ def build(out, N):
                  which="nearest", ref=None),
         ]
 
+    # ---- 7. 有限元广义问题 Kx=λMx（Nédélec 棱边元；需 scikit-fem，曲面几何需 gmsh） ----
+    cases += fem_cases(os.path.join(os.path.dirname(out.rstrip("/")), "fem"))
+
     with open(os.path.join(out, "cases.json"), "w", encoding="utf-8") as fh:
         json.dump(cases, fh, ensure_ascii=False, indent=1)
     for c in cases:
         print(c["name"], c["scenario"], os.path.basename(c["matrix"]))
+    return cases
+
+
+def fem_cases(out):
+    """有限元算例：特征值 λ = k₀²（mm⁻²），查询频率换算见 emslice.femgen.lam_of_ghz。"""
+    try:
+        from emslice import femgen
+    except ImportError:
+        return []
+    os.makedirs(out, exist_ok=True)
+    cases = []
+    for name in ("fem-cavity", "fem-dr", "fem-ferrite"):
+        try:
+            K, M, meta = femgen.preset(name)
+        except (ImportError, FileNotFoundError) as e:
+            print(f"跳过 {name}：{e}")
+            continue
+        stem = os.path.join(out, name.replace("-", "_"))
+        save_matrix(stem + ".npz", K)
+        save_matrix(stem + "_B.npz", M)
+        with open(stem + ".json", "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=1)
+        base = dict(matrix=stem + ".npz", B=stem + "_B.npz", ref=None, null_dim=meta["null_dim"])
+        if name == "fem-cavity":
+            cases.append(dict(base, name="fem_cavity_low", scenario="fem_generalized+near_zero", k=20,
+                              sigma=float(femgen.lam_of_ghz(0.01)), which="above"))
+        elif name == "fem-dr":
+            cases += [
+                dict(base, name="fem_dr_low", scenario="fem_generalized+dielectric+near_zero", k=10,
+                     sigma=float(femgen.lam_of_ghz(0.01)), which="above"),
+                dict(base, name="fem_dr_band", scenario="fem_generalized+dielectric+mid_band", k=20,
+                     sigma=float(femgen.lam_of_ghz(5.0)), which="nearest"),
+            ]
+        else:
+            # 8.5 GHz 附近 8 个：含旋磁效应劈裂的反向旋转模对（7.0/7.1 GHz），决定环行器工作带宽
+            cases.append(dict(base, name="fem_ferrite_band", scenario="fem_generalized+complex_herm", k=8,
+                              sigma=float(femgen.lam_of_ghz(8.5)), which="nearest"))
     return cases
 
 

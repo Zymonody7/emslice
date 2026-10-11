@@ -14,4 +14,6 @@ dependencies:
   - psutil
   - threadpoolctl
   - matplotlib          # 绘制报告图
+  - scikit-fem          # 有限元基准算例（Nédélec 棱边元）
+  - gmsh                # 有限元基准的曲面几何网格（作为外部程序调用）
   - pytest

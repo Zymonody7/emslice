@@ -13,6 +13,23 @@ HAS_INERTIA = "petsc" in available_backends()
 needs_inertia = pytest.mark.skipif(not HAS_INERTIA, reason="需要 PETSc+MUMPS 后端")
 
 
+def _has_fem(gmsh=False):
+    try:
+        import skfem  # noqa: F401
+
+        if gmsh:
+            from emslice.femgen import _gmsh_cmd
+
+            _gmsh_cmd()
+        return True
+    except (ImportError, FileNotFoundError):
+        return False
+
+
+needs_fem = pytest.mark.skipif(not _has_fem(), reason="需要 scikit-fem")
+needs_gmsh = pytest.mark.skipif(not _has_fem(gmsh=True), reason="需要 scikit-fem 与 gmsh")
+
+
 # ------------------------------------------------------------------ 生成器
 @pytest.mark.parametrize(
     "grid",
@@ -180,3 +197,53 @@ def test_degraded_backend_without_inertia():
     a, b = float(phys[5]) - 1e-6, float(phys[25]) + 1e-6
     lam, X, rep = Solver(A, None, Options(which="interval", interval=(a, b), slice_max=8, backend="scipy")).solve()
     assert lam.size == np.sum((ev >= a) & (ev <= b))
+
+
+# ------------------------------------------------------------------ 有限元广义问题
+def _dense_gen(K, M):
+    import scipy.linalg as la
+
+    return la.eigh(K.toarray(), M.toarray(), eigvals_only=True)
+
+
+@needs_fem
+def test_fem_cavity_null_space_and_analytic():
+    from emslice.femgen import analytic_cavity, fem_cavity
+
+    K, M, info = fem_cavity(h=4.0)
+    w = _dense_gen(K, M)
+    assert np.sum(w < 1e-8) == info["null_dim"]                # 梯度零空间维数 = 内部节点数
+    phys = w[w > 1e-8]
+    ref = analytic_cavity((30.0, 24.0, 18.0), 0.2)
+    assert np.abs(phys[:3] / ref[:3] - 1).max() < 0.01         # 粗网格（h=4 mm）下前几阶 k² 与连续解析解相差 < 1%
+
+
+@needs_fem
+@needs_inertia
+def test_fem_generalized_certified():
+    from emslice.femgen import fem_cavity
+
+    K, M, info = fem_cavity(h=4.0)
+    w = _dense_gen(K, M)
+    phys = w[w > 1e-8]
+    lam, X, rep = Solver(K, M, Options(k=10, sigma=1e-6, which="above")).solve()
+    assert rep.certified and np.abs(lam - phys[:10]).max() < 1e-9 * phys[9]
+    s = float(0.5 * (phys[20] + phys[21]))
+    lam, X, rep = Solver(K, M, Options(k=12, sigma=s)).solve()
+    ref = np.sort(w[np.argsort(np.abs(w - s))[:12]])
+    assert rep.certified and np.abs(np.sort(lam) - ref).max() < 1e-9 * ref.max()
+
+
+@needs_gmsh
+@needs_inertia
+def test_fem_ferrite_complex_hermitian_generalized():
+    from emslice.femgen import fem_ferrite
+
+    K, M, info = fem_ferrite(h=6.0)
+    assert np.iscomplexobj(K.data) and abs(K - K.conj().T).max() == 0
+    w = _dense_gen(K, M)
+    phys = w[w > 1e-8]
+    s = float(0.5 * (phys[10] + phys[11]))
+    lam, X, rep = Solver(K, M, Options(k=8, sigma=s)).solve()
+    ref = np.sort(w[np.argsort(np.abs(w - s))[:8]])
+    assert rep.certified and np.abs(np.sort(lam) - ref).max() < 1e-9 * ref.max()

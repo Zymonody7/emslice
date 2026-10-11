@@ -14,6 +14,7 @@ dependencies = ["numpy>=1.22", "scipy>=1.9", "pyyaml>=6"]
 [project.optional-dependencies]
 mumps = ["petsc4py", "slepc4py"]   # 推荐经 conda-forge 安装，见 environment.yml
 test = ["pytest"]
+fem = ["scikit-fem>=11"]              # 有限元算例；曲面几何另需 gmsh 程序
 
 [project.scripts]
 emslice = "emslice.cli:main"

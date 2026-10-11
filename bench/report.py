@@ -89,27 +89,30 @@ def plot(by, d):
     fig, ax = plt.subplots(figsize=(max(8, 1.1 * len(names)), 4.2))
     colors = {"emslice": "#2a6fdb", "emslice-noverify": "#8fb4ee", "slepc": "#9aa3ad", "scipy": "#d9a441"}
     for i, s in enumerate(SOLVERS):
-        vals, bad = [], []
+        vals, bad, tout = [], [], []
         for n in names:
             r = by[n].get(s, {})
-            v = r.get("seconds") if r and not r.get("error") else None
+            to = bool(r) and str(r.get("error") or "").startswith("timeout")
+            v = r.get("seconds") if r and (not r.get("error") or to) else None
             vals.append(np.nan if v is None else v)
+            tout.append(to)
             # 结果错误：后向误差 > 1e-8，或返回个数不足（漏解/空结果）
             req = by[n].get("emslice", {}).get("k")
             bad.append(bool(r) and ((r.get("backward_max") or 0) > 1e-8 or (req is not None and (r.get("k") or 0) < req)))
         xs = x + (i - 1.5) * wdt
         ax.bar(xs, vals, wdt, label=LABEL[s], color=colors[s])
-        for xi, v, b in zip(xs, vals, bad):
+        for xi, v, b, to in zip(xs, vals, bad, tout):
             if b:
                 hv = v if np.isfinite(v) else 1.0
                 ax.bar(xi, hv, wdt, color="none", edgecolor="#c0392b", hatch="////", linewidth=0)
-                ax.text(xi, hv * 1.08, "×", ha="center", va="bottom", color="#c0392b", fontsize=11, fontweight="bold")
+                ax.text(xi, hv * 1.08, "超时" if to else "×", ha="center", va="bottom", color="#c0392b",
+                        fontsize=7 if to else 11, fontweight="bold")
     ax.set_yscale("log")
     ax.set_ylabel("耗时 (s，对数)")
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
     ax.legend(fontsize=8, frameon=False, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.0))
-    ax.set_title("红色斜线 + × = 结果错误（后向误差 > 1e-8 或漏解/空结果）", fontsize=8, color="#c0392b", pad=22)
+    ax.set_title("红色斜线 + × = 结果错误（后向误差 > 1e-8 或漏解/空结果）；“超时”柱高为时限", fontsize=8, color="#c0392b", pad=22)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(d, "time_compare.png"), dpi=160)
