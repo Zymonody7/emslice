@@ -455,8 +455,9 @@ class Solver:
         elif locked is None:
             # 鲲鹏 8 核实测（k=20/30，四个十万阶矩阵）：nev+8p 比 nev+6p 少 5–22% 的 Krylov 时间（重启 3–5 次 → 2–3 次）
             ncv = max(2 * nev + 2 * p, nev + 8 * p, 48)
-        else:  # 收缩补解：只缺少量特征值，用小基即可
-            ncv = max(2 * nev + 2 * p, 3 * p)
+        else:  # 收缩补解：只缺少量特征值，但缺的往往是窗口边缘的简并副本，紧邻其它特征值，基太小会反复重启
+            # （鲲鹏复厄密算例：缺 4 个、ncv=24 时重启 36 次、作用 312 次）
+            ncv = max(2 * nev + 2 * p, nev + 6 * p, 40)
         ks_which = {"nearest": "LM", "above": "LA", "below": "SA"}[which]
         t = time.perf_counter()
         with self._thr_solve():
@@ -702,9 +703,12 @@ class Solver:
         return next((f.get("seconds_factor", 0.0) for f in self.rep.factorizations if not f.get("count_only")), 0.0)
 
     def _expensive(self, F):
-        """分解很贵（实测 ≥15 s，如复厄密周期问题）：单精度计数省下的时间超过一轮收缩补解，值得把少量未求出的
-        简并副本并入窗口交给补解。只影响耗时，不影响正确性。"""
-        return self._first_factor_seconds() >= 15.0
+        """是否值得把少量未求出的特征值并入证书窗口、交给收缩补解，以换取该侧用单精度计数。
+        省下的约是半次数值分解（≈0.4×首次分解耗时），付出的是一轮补解 Krylov——被并入的往往是 r_k 外侧的近并列特征值，
+        补解代价与主 Krylov 相当（鲲鹏复厄密算例实测补解 160–310 次算子作用，主 Krylov 152 次）。
+        只在前者明显更大（> 2×主 Krylov 耗时）时才并入。只影响耗时，不影响正确性。"""
+        ks = self.rep.krylov_runs[0]["seconds"] if self.rep.krylov_runs else np.inf
+        return 0.4 * self._first_factor_seconds() > 2.0 * ks
 
     def _plan_mixed(self, sigma, k, lam, ritz, expensive=False):
         """混合精度证书的端点规划：两侧各返回 (x, 扰动方向, 精度)；单精度不适用时返回 None。
