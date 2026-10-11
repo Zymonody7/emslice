@@ -41,7 +41,7 @@ def fmt(x, f="{:.2e}"):
 
 def main(d):
     by = load(d)
-    lines = ["# 基准测试结果", "", f"数据：`{d}/results.jsonl`；每个算例在独立子进程中运行（峰值内存隔离）。", ""]
+    lines = ["# 基准测试结果", "", f"数据：`{d}/results.jsonl`；每个算例在独立子进程中运行（峰值内存隔离，含惯性计数子进程）。", ""]
     lines += ["| 算例 | 场景 | n | 求解器 | 耗时 (s) | 峰值内存 (MB) | 返回 | 证书 | 最大后向误差 | 特征值误差（相对‖A‖） | 漏解 |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, sv in by.items():
@@ -56,7 +56,7 @@ def main(d):
             err = r.get("error")
             lines.append(
                 f"| {name} | {r.get('scenario', '')} | {r.get('n', '—')} | {LABEL[s]} | "
-                f"{fmt(r.get('seconds'), '{:.1f}')} | {fmt(r.get('peak_rss_mb'), '{:.0f}')} | "
+                f"{fmt(r.get('seconds'), '{:.1f}')} | {fmt(r.get('peak_tree_mb') or r.get('peak_rss_mb'), '{:.0f}')} | "
                 f"{r.get('k', '—') if not err else '失败'} | {cert} | {fmt(r.get('backward_max'))} | {fmt(ref_err)} | "
                 f"{r.get('missing_vs_ref', '—') if not err else err[:40]} |")
     out = os.path.join(d, "report.md")
