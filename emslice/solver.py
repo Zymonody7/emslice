@@ -861,7 +861,8 @@ class Solver:
                 return False, lam, X, F
             found_in = int(np.sum((lam > x_lo) & (lam < x_hi)))
             rk = float(np.abs(lam[:k] - sigma).max())
-            self.rep.certificate = dict(round=rnd, kind="mixed-window", count_precision=[lo[2], hi[2]], window=[x_lo, x_hi],
+            kind = "mixed-window" if "single" in (lo[2], hi[2]) else "window"
+            self.rep.certificate = dict(round=rnd, kind=kind, count_precision=[lo[2], hi[2]], window=[x_lo, x_hi],
                                         eta=[e_lo, e_hi], r_k=rk, inertia_count=inside, found_in_window=found_in)
             if inside == found_in:
                 lam, X = self._order(lam, X, sigma, "nearest")
@@ -986,8 +987,9 @@ class Solver:
             pts += [(abs(xb - x0), (nb - n0) * sgn, nb, xb) for (nb, xb) in res]
             n_batches += 1
         d, c, nb, xb = min((p for p in pts if p[1] >= k), key=lambda p: p[1])
+        par = f"，{n_batches} 批并发" if self._parallel else ""
         self.rep.diagnostics.append(f"[目标重定位] 惯性括区：[{min(x0, xb):.6g}, {max(x0, xb):.6g}] 内含 {c} 个特征值"
-                                    f"（{len(pts) + 1} 次惯性计数，{n_batches} 批并发），位移移至区间中部求解")
+                                    f"（{len(pts) + 1} 次惯性计数{par}），位移移至区间中部求解")
         eb = self.eta(xb, self.count_prec) if self.count_prec == "single" else 0.0
         a, b, na, nbb, ea_, eb_ = (x0, xb, n0, nb, 0.0, eb) if sgn > 0 else (xb, x0, nb, n0, eb, 0.0)
         lam, X = self._solve_range(a, b, na, nbb, ea_, eb_)
