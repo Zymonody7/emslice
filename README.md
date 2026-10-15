@@ -2,6 +2,8 @@
 
 > 2026 上海开源软件应用创新大赛 · AI+工业软件赛道 · 中国商飞赛题
 > 「面向电磁谐振与微波器件仿真的高效、稳定求解方案」
+>
+> [演示视频](https://zymonody7.github.io/emslice/) · [作品介绍（PDF）](docs/作品介绍.pdf) · [方案说明文档（PDF）](docs/方案说明文档.pdf) · [v0.2.0 发布](https://github.com/Zymonody7/emslice/releases/tag/v0.2.0)
 
 求解十万阶及以上**非正定厄密稀疏矩阵** `A x = λ x`（可选广义 `A x = λ B x`）中目标频段的特征对。
 核心目标：**目标频段的谐振模式一个不漏**，并给出可审计的证据。
@@ -82,6 +84,22 @@ emslice check data/small/cube20.npz result
 
 网格由 gmsh 作为独立外部程序生成（.geo → .msh），生成过程确定，矩阵逐字节可复现。
 
+## 使用的接口与权限
+
+按任务书“实现约束”要求，声明本项目实际使用的接口与所需权限：
+
+| 类别 | 内容 |
+|---|---|
+| 运行身份 | 普通用户即可，不需要 root / 管理员权限，不安装系统服务 |
+| 网络 | 求解、复核与测试**不访问网络**，不调用任何外部或闭源服务；只有安装依赖（conda/pip）与 `bench/get_public.sh` 下载 SuiteSparse 公开矩阵时联网 |
+| 读文件 | 命令行给出的矩阵文件（含 `--B` 质量阵）与 `--config` 配置文件；numpy 文件一律 `allow_pickle=False` 读取 |
+| 写文件 | 只写 `--out` 指定的目录（特征值、特征向量、`report.json`）；外存模式下 MUMPS 因子临时写入 `MUMPS_OOC_TMPDIR`（缺省 `/tmp`），结束即删除；`gen fem-*` 的网格在系统临时目录生成后删除 |
+| 进程 | 本机 `spawn` 子进程（惯性计数进程池，矩阵只在本进程树内传递）；`gen fem-*` 调用外部程序 `gmsh`；macOS 上调用 `sysctl` 读取性能核数 |
+| 库接口 | petsc4py：PETSc 稀疏矩阵、MUMPS 对称不定 LDLᵀ（`getInertia` 取惯性，ICNTL 7/13/14/22/23/24/31/35 控制排序、零主元检测、外存、内存上限、丢弃因子、BLR）；SciPy：稀疏矩阵与 SuperLU 降级后端；slepc4py 只在 `bench/` 中作对比基线 |
+| 环境变量 | `--threads` 设置 `OMP_NUM_THREADS` 等线程数变量；单进程 MPI 传输 Linux 设 `UCX_TLS=self,sm`、macOS 设 `FI_PROVIDER`/`FI_UDP_IFACE`（均不覆盖用户已设的值） |
+| 命题方资源 | 未使用命题方的测试环境或基础镜像；测试矩阵由本项目生成器确定性生成，另用 SuiteSparse 公开电磁矩阵 |
+| 数据保护 | 日志与报告只记录形状、非零元数、dtype、SHA-256 摘要，不输出矩阵数值；`--secure` 使结果文件为 0600 且报告不记录输入路径 |
+
 ## 目录
 
 ```
@@ -90,11 +108,12 @@ bench/     cases.py 基准算例 | run.py 运行器（子进程隔离内存）| 
 tests/     单元与场景测试（pytest）
 .github/   CI（完整后端 + 降级模式）、Issue/PR 模板
 configs/   默认配置
-docs/      赛题任务书、方案说明文档、演示视频脚本
+docs/      方案说明文档、作品介绍、演示视频脚本（赛题任务书以大赛官网为准，不入库）
+site/      演示视频页（GitHub Pages，视频取自最新 Release）
 scripts/   reproduce.sh 一键复现
 ```
 
-## 当前进展（2026-10-12）
+## 当前进展（2026-10-15）
 
 - [x] 求解器全部核心能力；26 项测试通过（CI：Linux/macOS 完整后端 + Python 3.9/3.12 降级模式）
 - [x] 10 万阶基准：10 个 Yee/公开矩阵算例 + 4 个有限元广义问题算例（含复厄密铁氧体），全部证书通过
@@ -112,6 +131,7 @@ scripts/   reproduce.sh 一键复现
 - [x] 任务书故障场景逐项实测（`bench/scenarios.py`）：低频击穿、重特征值、近奇异、大 k、区间、内存受限（`--mem-limit-gb` 自动外存）
 - [x] 稳健性：检出 MUMPS 静默失败；k 跨进梯度零空间时证书端点只向内扰动、窗口跨进超大簇时核对后补取簇内向量；区间内超大近同值簇只报告重数；
       阈值以 ‖A‖/‖B‖ 为特征值单位（广义问题与单位制无关）
+- [x] v0.2.0 发布（GitHub Release 附方案说明文档、作品介绍 PDF 与演示视频）
 
 ## 参与贡献
 

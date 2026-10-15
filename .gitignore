@@ -14,6 +14,11 @@ results/*.log
 # 命题方任务书仅本地参考，以官网发布为准
 docs/赛题任务书.pdf
 results/*/done
+# 2026-10-11 的中间结果，已被 results/p8 取代
+results/explore/
+results/kunpeng8-final2/
+results/memory/
+results/v01-vs-v02/
 
 # 生成的演示视频与中间文件
 video/

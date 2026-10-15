@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emslice"
-version = "0.1.0"
+version = "0.2.0"
 description = "面向电磁谐振与微波器件仿真的大规模非正定厄密稀疏特征值求解器（惯性证书谱切片 + 位移求逆块 Krylov-Schur）"
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -1,0 +1,40 @@
+name: Pages
+
+# 演示视频页：site/ 加上最新 Release 中的演示视频与文档 PDF（视频不入 git 历史）
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 组装站点
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p _site
+          cp site/* _site/
+          gh release download --repo "$GITHUB_REPOSITORY" --dir _site \
+            --pattern emslice-demo.mp4 --pattern emslice-intro.pdf --pattern emslice-solution.pdf
+          ls -la _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
